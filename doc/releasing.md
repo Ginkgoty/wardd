@@ -53,7 +53,11 @@ Before tagging a stable release:
 1. Ensure the nightly workflow for the intended commit is green.
 2. Test that nightly build on representative Ubuntu and RHEL/Rocky hosts,
    including package install/upgrade/removal, Nginx integration, reboot,
-   observation mode, enforcement, and XDP detachment.
+   observation mode, enforcement, and XDP detachment. Record the outcome, and
+   what was not covered, in an acceptance record like
+   [acceptance-v0.1.0.md](acceptance-v0.1.0.md). `tests/packages/run.sh` and
+   `tests/xdp_netns.sh` automate most of it; a physical NIC, a distribution
+   kernel and SELinux enforcing still need a real host.
 3. Confirm cloud-console or equivalent recovery and verify IPv4/IPv6 CN and
    non-CN behavior without disrupting required outbound connections.
 4. Review security-sensitive changes, generated package contents, runtime

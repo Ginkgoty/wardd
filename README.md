@@ -171,6 +171,8 @@ sudo wardctl xdp detach
   constraint, and security semantic.
 - [Release process](doc/releasing.md): nightly semantics, stable versioning,
   release gates, tag creation, artifacts, and recovery from failed releases.
+- [v0.1.0 acceptance record](doc/acceptance-v0.1.0.md): what was verified
+  before the release, on which hosts, and what remains unverified.
 
 ## Common operations
 
