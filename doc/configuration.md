@@ -95,6 +95,33 @@ limit, and verifies SHA-256. Success only creates an immutable snapshot; it
 never activates it. The first snapshot is approved automatically. A later
 anomalous change requires `geo approve`.
 
+### What the checksum does and does not prove
+
+In the shipped example both `url` and `checksum_url` point at the same
+publisher and the same mutable `latest` release tag. The SHA-256 comparison
+therefore proves that the file arrived intact — it detects truncation, a
+corrupted mirror, and tampering in transit. It is **not** an independent trust
+anchor: whoever can publish to that release supplies the payload and the digest
+that describes it, and a mutable tag can be repointed at new content.
+
+Two properties provide the actual protection, and neither should be weakened:
+
+- `max_change_ratio` (default `0.20`) holds back any snapshot that changes more
+  of the prefix set than the configured fraction. It lands as `pending_review`
+  and requires an explicit `geo approve`, so a wholesale replacement of the
+  region cannot activate itself.
+- Downloading never activates. Activation is always a separate, explicit
+  command, and a failed activation restores the previous generated
+  configuration.
+
+To reduce exposure further, point `url` and `checksum_url` at an **immutable**
+release tag rather than a rolling one, and re-pin deliberately when you intend
+to take an update. Reviewing the `geo diff` output before `geo approve` is the
+control that catches a change you did not expect.
+
+Verification against a separately trusted signature or a pinned publisher key
+is not implemented in schema 1.
+
 ## `[xdp]`
 
 All six fields in this section are required.

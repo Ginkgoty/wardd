@@ -5,6 +5,7 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Lightweight Linux edge firewall control p
 set(CPACK_PACKAGE_HOMEPAGE_URL "${PROJECT_HOMEPAGE_URL}")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "wardd")
 set(CPACK_PACKAGE_RELOCATABLE OFF)
 set(CPACK_STRIP_FILES ON)
@@ -29,12 +30,27 @@ set(CPACK_RPM_PACKAGE_DESCRIPTION
     "wardd compiles reviewed GeoIP policy for XDP and Nginx and maintains durable IP bans. It does not modify host or cloud firewall rules."
 )
 set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
-# No repository-wide software license has been declared yet. Keep the package
-# metadata explicit without choosing a license on the owner's behalf.
-set(CPACK_RPM_PACKAGE_LICENSE "Unspecified")
+set(CPACK_RPM_PACKAGE_LICENSE "BSD-3-Clause")
 set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
 set(CPACK_RPM_PACKAGE_REQUIRES "ca-certificates")
+set(CPACK_RPM_PACKAGE_SUGGESTS "nginx")
 set(CPACK_RPM_PACKAGE_RELEASE_DIST ON)
+# Standard system directories are owned by filesystem(1)/systemd. Claiming them
+# makes the RPM fail its transaction test with a file conflict, so wardd owns
+# only the directories it introduces. Files inside these directories are still
+# packaged; only the directory entries are dropped.
+set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+    /usr/sbin
+    /usr/lib
+    /usr/lib/systemd
+    /usr/lib/systemd/system
+    /usr/lib/tmpfiles.d
+    /usr/share
+    /usr/share/doc
+)
+set(CPACK_RPM_USER_FILELIST
+    "%license ${CMAKE_INSTALL_FULL_DATAROOTDIR}/doc/wardd/LICENSE"
+)
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE
     "${CMAKE_SOURCE_DIR}/packaging/rpm/post-install.sh"
 )

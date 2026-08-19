@@ -37,6 +37,14 @@ struct wardd_nginx_event_reader {
     dev_t pending_device;
     ino_t pending_inode;
     bool missing_log_seen;
+    /*
+     * Malformed lines are skipped, not fatal. A single unparseable record must
+     * not be able to disable automatic banning: nginx renders an empty
+     * $server_name for any server block without a server_name directive, which
+     * is an ordinary configuration.
+     */
+    uint64_t rejected_events;
+    char last_reject_reason[128];
 };
 
 int wardd_nginx_event_parse(

@@ -7,8 +7,31 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/sbin/wardctl geo update
 UMask=0077
+
+# This unit parses a downloaded MMDB through libmaxminddb. It is the largest
+# untrusted-input surface in the product, so it is confined tightly. It only
+# downloads and stages a snapshot; activation is a separate explicit command,
+# which is why /etc/wardd/generated stays read-only here.
+StateDirectory=wardd
+StateDirectoryMode=0750
+CapabilityBoundingSet=
+NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectHome=yes
 ProtectSystem=strict
-NoNewPrivileges=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 ReadWritePaths=/var/lib/wardd
+

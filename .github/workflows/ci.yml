@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential ca-certificates clang cmake iproute2 libbpf-dev \
+            libcurl4-openssl-dev libmaxminddb-dev libssl-dev libxdp-dev \
+            nginx pkg-config python3
+
+      - name: Record the test environment
+        run: |
+          uname -a
+          clang --version | head -1
+          nginx -v 2>&1
+          pkg-config --modversion libxdp libbpf || true
+
+      # nginx and the MMDB fixture gate the GeoIP, snapshot and Nginx tests;
+      # without them CTest silently registers a much smaller suite.
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWARDD_BUILD_BPF=ON \
+            -DWARDD_ENABLE_RUNTIME_TESTS=ON \
+            -DWARDD_ENABLE_PRIVILEGED_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # Guards against the suite silently shrinking again.
+      - name: Assert the full suite is registered
+        run: |
+          expected="auto_ban ban bpf_object config daemon_events fetch geo_mmdb nginx nginx_events nginx_live_events snapshot xdp_netns"
+          registered=$(ctest --test-dir build -N | sed -n 's/^ *Test *#[0-9]*: //p' | sort | tr '\n' ' ')
+          echo "registered: $registered"
+          for name in $expected; do
+            case " $registered " in
+              *" $name "*) ;;
+              *) echo "::error::test '$name' is not registered"; exit 1 ;;
+            esac
+          done
+
+      - name: Run the unprivileged suite
+        run: ctest --test-dir build --output-on-failure -E xdp_netns
+
+      # Drives the real BPF program over a veth pair in a throwaway namespace.
+      - name: Run the privileged XDP data-plane test
+        run: sudo ctest --test-dir build --output-on-failure -R xdp_netns
+
+      - name: Show XDP test diagnostics on failure
+        if: failure()
+        run: |
+          sudo ip link show || true
+          sudo ip netns list || true
+          sudo ls -R /sys/fs/bpf || true
+          sudo dmesg | tail -50 || true
+
+  packages:
+    name: Package lifecycle (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ubuntu-24.04, rocky-9]
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Run the package install/upgrade/removal contract test
+        run: tests/packages/run.sh ${{ matrix.target }}

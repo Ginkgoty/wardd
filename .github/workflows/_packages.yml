@@ -45,9 +45,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential ca-certificates clang cmake dpkg-dev \
+            build-essential ca-certificates clang cmake dpkg-dev iproute2 \
             libbpf-dev libcurl4-openssl-dev libmaxminddb-dev libssl-dev \
-            libxdp-dev pkg-config
+            libxdp-dev nginx pkg-config python3
 
       - name: Configure
         run: |
@@ -57,19 +57,37 @@ jobs:
             -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_INSTALL_SYSCONFDIR=/etc \
             -DWARDD_BUILD_BPF=ON \
+            -DWARDD_ENABLE_RUNTIME_TESTS=ON \
+            -DWARDD_ENABLE_PRIVILEGED_TESTS=ON \
             -DWARDD_PACKAGE_CHANNEL="$WARDD_CHANNEL" \
             -DWARDD_PACKAGE_BUILD_ID="$WARDD_BUILD_ID"
 
       - name: Build and test
         run: |
           cmake --build build --parallel
-          ctest --test-dir build --output-on-failure
+          ctest --test-dir build --output-on-failure -E xdp_netns
+
+      - name: Test the XDP data plane
+        run: sudo ctest --test-dir build --output-on-failure -R xdp_netns
 
       - name: Build and inspect DEB
         run: |
           cpack --config build/CPackConfig.cmake -G DEB
           dpkg-deb --info build/packages/*.deb
           dpkg-deb --contents build/packages/*.deb
+
+      # The metadata queries above are display-only; install the package so a
+      # broken file list or dependency cannot ship unnoticed.
+      - name: Verify the DEB installs
+        run: |
+          sudo apt-get install --yes ./build/packages/*.deb
+          test -x /usr/sbin/wardd
+          test -x /usr/sbin/wardctl
+          test -f /usr/lib/wardd/wardd.bpf.o
+          test -f /usr/share/doc/wardd/copyright
+          /usr/sbin/wardctl --version
+          test ! -e /etc/wardd/wardd.toml   # installation stays passive
+          sudo apt-get remove --yes wardd
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
@@ -104,9 +122,9 @@ jobs:
       - name: Install Rocky Linux build dependencies
         run: |
           dnf install --assumeyes --setopt=install_weak_deps=False \
-            ca-certificates clang cmake gcc git libbpf-devel libcurl-devel \
-            libmaxminddb-devel libxdp-devel make openssl-devel \
-            pkgconf-pkg-config rpm-build
+            ca-certificates clang cmake gcc git iproute libbpf-devel \
+            libcurl-devel libmaxminddb-devel libxdp-devel make nginx \
+            openssl-devel pkgconf-pkg-config python3 rpm-build sudo
 
       - name: Check out source
         uses: actions/checkout@v4
@@ -119,6 +137,8 @@ jobs:
             -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_INSTALL_SYSCONFDIR=/etc \
             -DWARDD_BUILD_BPF=ON \
+            -DWARDD_ENABLE_RUNTIME_TESTS=ON \
+            -DWARDD_ENABLE_PRIVILEGED_TESTS=ON \
             -DWARDD_PACKAGE_CHANNEL="$WARDD_CHANNEL" \
             -DWARDD_PACKAGE_BUILD_ID="$WARDD_BUILD_ID"
 
@@ -133,6 +153,19 @@ jobs:
           rpm --query --package --info build/packages/*.rpm
           rpm --query --package --list build/packages/*.rpm
           rpm --query --package --requires build/packages/*.rpm
+
+      # The metadata queries above are display-only. Actually installing the
+      # package is what catches a broken file list: claiming ownership of
+      # /usr/sbin made every RPM fail its transaction test while CI stayed green.
+      - name: Verify the RPM installs
+        run: |
+          dnf install --assumeyes build/packages/*.rpm
+          test -x /usr/sbin/wardd
+          test -x /usr/sbin/wardctl
+          test -f /usr/lib/wardd/wardd.bpf.o
+          test -f /usr/share/doc/wardd/LICENSE
+          /usr/sbin/wardctl --version
+          test ! -e /etc/wardd/wardd.toml   # installation stays passive
 
       - name: Upload RPM
         uses: actions/upload-artifact@v4

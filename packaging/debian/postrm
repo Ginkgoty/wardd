@@ -5,4 +5,16 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
 fi
 
+# Drop enable-state so an administrator's `systemctl enable` does not leave a
+# dangling symlink behind.
+if [ "$1" = "purge" ] && command -v deb-systemd-helper >/dev/null 2>&1; then
+    deb-systemd-helper purge wardd.service >/dev/null 2>&1 || true
+    deb-systemd-helper purge wardd-geo-update.service >/dev/null 2>&1 || true
+    deb-systemd-helper purge wardd-geo-update.timer >/dev/null 2>&1 || true
+fi
+
+# /var/lib/wardd is deliberately preserved even on purge. It holds durable ban
+# state, policy snapshots and the audit log, which an operator may still need
+# after removing the software. Remove it manually if that is intended.
+
 exit 0

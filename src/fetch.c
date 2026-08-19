@@ -110,6 +110,13 @@ int wardd_https_download(
     SETOPT(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
     SETOPT(CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
 #endif
+    /*
+     * Certificate verification and the TLS floor are libcurl defaults today,
+     * but this is the MMDB supply chain: assert them rather than inherit them.
+     */
+    SETOPT(CURLOPT_SSL_VERIFYPEER, 1L);
+    SETOPT(CURLOPT_SSL_VERIFYHOST, 2L);
+    SETOPT(CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
     SETOPT(CURLOPT_FOLLOWLOCATION, 1L);
     SETOPT(CURLOPT_MAXREDIRS, 3L);
     SETOPT(CURLOPT_CONNECTTIMEOUT, 15L);

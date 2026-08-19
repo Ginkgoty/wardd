@@ -60,10 +60,12 @@ Before tagging a stable release:
    dependencies, and `SHA256SUMS`.
 5. Update `project(... VERSION ...)` in `CMakeLists.txt` to the intended
    semantic version and merge that change to `main`.
-6. Decide and document the repository-wide software license before the first
-   public stable release. Until then RPM metadata intentionally reports
-   `Unspecified`; the BPF program's kernel-facing GPL declaration is not a
-   repository-wide license grant.
+6. Confirm the packaged license metadata still matches the repository. wardd
+   is licensed under BSD-3-Clause (`LICENSE`); packages carry
+   `/usr/share/doc/wardd/LICENSE` and a DEP-5
+   `/usr/share/doc/wardd/copyright`, RPM metadata reports `BSD-3-Clause`, and
+   the BPF program's kernel-facing `GPL` declaration remains a helper-licensing
+   declaration rather than a second repository grant.
 
 The stable workflow enforces three additional invariants:
 

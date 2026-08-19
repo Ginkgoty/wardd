@@ -135,6 +135,38 @@ int main(void)
     CHECK(wardd_nginx_event_parse("{\"schema\":2}", &parsed, error, sizeof(error)) != 0,
         "reject unknown event schema");
 
+    /*
+     * Regression: a malformed record must be skipped, not treated as fatal.
+     * nginx renders an empty $server_name for any server block without a
+     * server_name directive, so a routine configuration used to permanently
+     * disable automatic banning after a single line.
+     */
+    {
+        const uint64_t rejected_before = reader.rejected_events;
+        static const char empty_server[] =
+            "{\"schema\":1,\"peer\":\"8.8.4.4\",\"server\":\"\","
+            "\"zone\":\"api\",\"status\":\"REJECTED\",\"request_id\":\"poison\","
+            "\"epoch\":\"1006.123\"}\n";
+
+        CHECK(write_text(log_path, "a", empty_server) == 0, "append empty-server_name event");
+        CHECK(wardd_nginx_event_reader_step(
+            &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0,
+            "empty server_name is skipped rather than fatal");
+        CHECK(processed == 0 && reader.rejected_events == rejected_before + 1,
+            "malformed line is counted as rejected");
+
+        CHECK(write_text(log_path, "a", "this is not a wardd event\n") == 0, "append garbage line");
+        CHECK(write_text(log_path, "a", "\n") == 0, "append empty line");
+        make_line(line, sizeof(line), "after-poison", 1007);
+        CHECK(write_text(log_path, "a", line) == 0, "append a valid event after the bad ones");
+        CHECK(wardd_nginx_event_reader_step(
+            &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0, error);
+        CHECK(processed == 1 && strcmp(handled.last_request, "after-poison") == 0,
+            "ingestion continues past malformed lines");
+        CHECK(reader.rejected_events == rejected_before + 3, "every malformed line is counted");
+        CHECK(reader.last_reject_reason[0] != '\0', "last rejection reason is recorded");
+    }
+
     wardd_nginx_event_reader_close(&reader);
     CHECK(wardd_nginx_event_reader_init(&reader, delayed_log, delayed_cursor, error, sizeof(error)) == 0, error);
     errno = 0;

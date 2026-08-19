@@ -207,3 +207,11 @@ the previous links and attempts to reload the previous configuration.
   control.
 - External dependency failures do not implicitly replace or disable the
   currently active policy.
+
+## License
+
+wardd is licensed under the BSD 3-Clause License. See [LICENSE](LICENSE).
+
+`bpf/wardd.bpf.c` declares `SEC("license") = "GPL"`. That string is the BPF
+program's runtime declaration to the kernel's helper-licensing check, not a
+second copyright grant: the file is BSD-3-Clause like the rest of the tree.

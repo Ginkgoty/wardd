@@ -330,28 +330,43 @@ static int process_buffer(
     size_t error_size
 )
 {
-    while (*processed < maximum_events) {
+    size_t consumed = 0;
+
+    while (consumed < maximum_events && *processed < maximum_events) {
         char *newline = memchr(reader->buffer, '\n', reader->buffered);
         struct wardd_auto_ban_event event;
+        char reject_reason[128];
         size_t line_length;
         uint64_t new_offset;
+        bool malformed = false;
         char saved;
 
         if (newline == NULL) return 0;
         line_length = (size_t)(newline - reader->buffer);
-        if (line_length == 0 || line_length >= WARDD_NGINX_EVENT_BUFFER_LEN ||
-            reader->committed_offset > UINT64_MAX - line_length - 1U) {
-            set_error(error, error_size, "Nginx limit event line is empty or unsafe");
+        if (reader->committed_offset > UINT64_MAX - line_length - 1U) {
+            set_error(error, error_size, "Nginx limit event offset would overflow");
             return -1;
         }
-        saved = reader->buffer[line_length];
-        reader->buffer[line_length] = '\0';
-        if (wardd_nginx_event_parse(reader->buffer, &event, error, error_size) != 0 ||
-            handler(&event, context, error, error_size) != 0) {
-            reader->buffer[line_length] = saved;
-            return -1;
+        if (line_length == 0 || line_length >= WARDD_NGINX_EVENT_BUFFER_LEN) {
+            malformed = true;
+            (void)snprintf(reject_reason, sizeof(reject_reason), "line is empty or oversized");
+        } else {
+            saved = reader->buffer[line_length];
+            reader->buffer[line_length] = '\0';
+            if (wardd_nginx_event_parse(reader->buffer, &event, reject_reason, sizeof(reject_reason)) != 0) {
+                malformed = true;
+                reader->buffer[line_length] = saved;
+            } else {
+                const int handled = handler(&event, context, error, error_size);
+                reader->buffer[line_length] = saved;
+                /*
+                 * A handler failure means the decision could not be applied
+                 * (for example durable ban state could not be written). That
+                 * is a real fault and must not be swallowed.
+                 */
+                if (handled != 0) return -1;
+            }
         }
-        reader->buffer[line_length] = saved;
         new_offset = reader->committed_offset + line_length + 1U;
         if (save_cursor_values(
                 reader, reader->device, reader->inode, new_offset, error, error_size
@@ -359,6 +374,14 @@ static int process_buffer(
         memmove(reader->buffer, reader->buffer + line_length + 1U, reader->buffered - line_length - 1U);
         reader->buffered -= line_length + 1U;
         reader->committed_offset = new_offset;
+        consumed++;
+        if (malformed) {
+            if (reader->rejected_events < UINT64_MAX) reader->rejected_events++;
+            (void)snprintf(
+                reader->last_reject_reason, sizeof(reader->last_reject_reason), "%s", reject_reason
+            );
+            continue;
+        }
         (*processed)++;
     }
     return 0;

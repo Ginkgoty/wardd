@@ -43,9 +43,55 @@ else()
     message(FATAL_ERROR "WARDD_PACKAGE_CHANNEL must be stable or nightly")
 endif()
 
+# Hardening for a root-privileged network daemon shipped as DEB/RPM.
+# _FORTIFY_SOURCE needs optimization and some toolchains predefine it, so it is
+# undefined first and applied only to optimized configurations.
+include(CheckPIESupported)
+check_pie_supported()
+set(WARDD_HARDENING_COMPILE_OPTIONS
+    -fstack-protector-strong
+    -fno-common
+    $<$<NOT:$<CONFIG:Debug>>:-U_FORTIFY_SOURCE>
+    $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>
+)
+set(WARDD_HARDENING_LINK_OPTIONS
+    -Wl,-z,relro
+    -Wl,-z,now
+    -Wl,-z,noexecstack
+)
+
 option(WARDD_BUILD_BPF "Build the XDP BPF object (requires clang and libbpf headers)" OFF)
 option(WARDD_ENABLE_RUNTIME_TESTS "Enable tests requiring local Unix socket operations" OFF)
+option(WARDD_ENABLE_PRIVILEGED_TESTS
+    "Enable tests that need root, a network namespace and bpffs" OFF
+)
 set(WARDD_TEST_MMDB_PATH "" CACHE FILEPATH "Optional MMDB file used by the integration test")
+
+# The GeoIP, Nginx, snapshot and XDP tests all need a real MMDB. Without one
+# they are silently not registered at all, which made a green test run look far
+# broader than it was. Generate a small synthetic database so those tests run
+# everywhere by default; WARDD_TEST_MMDB_PATH still overrides it with a real one.
+if(BUILD_TESTING AND NOT WARDD_TEST_MMDB_PATH)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        set(WARDD_GENERATED_MMDB "${CMAKE_CURRENT_BINARY_DIR}/wardd-test.mmdb")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_test_mmdb.py
+                ${WARDD_GENERATED_MMDB}
+            RESULT_VARIABLE WARDD_MMDB_STATUS
+            OUTPUT_QUIET
+        )
+        if(WARDD_MMDB_STATUS EQUAL 0)
+            set(WARDD_TEST_MMDB_PATH "${WARDD_GENERATED_MMDB}")
+            message(STATUS "wardd: generated a synthetic MMDB test fixture")
+        else()
+            message(WARNING "wardd: could not generate the MMDB test fixture; GeoIP tests are disabled")
+        endif()
+    else()
+        message(WARNING "wardd: python3 not found; GeoIP tests are disabled")
+    endif()
+endif()
 set(WARDD_MAXMINDDB_ROOT "" CACHE PATH "Optional root containing a local libmaxminddb installation")
 
 configure_file(
@@ -112,12 +158,16 @@ target_include_directories(wardd_core
 )
 
 target_compile_definitions(wardd_core PRIVATE _POSIX_C_SOURCE=200809L)
-target_compile_options(wardd_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_options(wardd_core PRIVATE -Wall -Wextra -Wpedantic -Werror ${WARDD_HARDENING_COMPILE_OPTIONS})
+set_property(TARGET wardd_core PROPERTY POSITION_INDEPENDENT_CODE TRUE)
 
 add_executable(wardd src/wardd.c)
 target_link_libraries(wardd PRIVATE wardd_core)
-target_compile_definitions(wardd PRIVATE _POSIX_C_SOURCE=200809L)
-target_compile_options(wardd PRIVATE -Wall -Wextra -Wpedantic -Werror)
+# _GNU_SOURCE exposes struct ucred for the SO_PEERCRED check on the control socket.
+target_compile_definitions(wardd PRIVATE _POSIX_C_SOURCE=200809L _GNU_SOURCE)
+target_compile_options(wardd PRIVATE -Wall -Wextra -Wpedantic -Werror ${WARDD_HARDENING_COMPILE_OPTIONS})
+target_link_options(wardd PRIVATE ${WARDD_HARDENING_LINK_OPTIONS})
+set_property(TARGET wardd PROPERTY POSITION_INDEPENDENT_CODE TRUE)
 
 add_executable(wardctl src/wardctl.c)
 target_link_libraries(wardctl PRIVATE wardd_core)
@@ -125,7 +175,9 @@ target_compile_definitions(wardctl PRIVATE
     _POSIX_C_SOURCE=200809L
     WARDD_DEFAULT_BPF_OBJECT="${CMAKE_INSTALL_FULL_LIBDIR}/wardd/wardd.bpf.o"
 )
-target_compile_options(wardctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_options(wardctl PRIVATE -Wall -Wextra -Wpedantic -Werror ${WARDD_HARDENING_COMPILE_OPTIONS})
+target_link_options(wardctl PRIVATE ${WARDD_HARDENING_LINK_OPTIONS})
+set_property(TARGET wardctl PROPERTY POSITION_INDEPENDENT_CODE TRUE)
 
 if(WARDD_BUILD_BPF)
     find_program(CLANG_EXECUTABLE clang REQUIRED)
@@ -169,6 +221,21 @@ if(WARDD_BUILD_BPF)
         add_dependencies(test_bpf_object wardd_bpf)
         add_test(NAME bpf_object COMMAND test_bpf_object)
     endif()
+endif()
+
+if(BUILD_TESTING AND WARDD_ENABLE_PRIVILEGED_TESTS AND WARDD_BUILD_BPF AND WARDD_TEST_MMDB_PATH)
+    # Drives the real BPF program over a veth pair inside a throwaway network
+    # namespace. Never touches a real interface. Reports 77 (skip) when the
+    # host cannot provide root or bpffs.
+    add_test(NAME xdp_netns
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/xdp_netns.sh
+            $<TARGET_FILE:wardctl>
+            $<TARGET_FILE:wardd>
+            ${WARDD_BPF_OBJECT}
+            ${WARDD_TEST_MMDB_PATH}
+    )
+    set_property(TEST xdp_netns PROPERTY SKIP_RETURN_CODE 77)
+    set_property(TEST xdp_netns PROPERTY TIMEOUT 300)
 endif()
 
 if(BUILD_TESTING)
@@ -280,6 +347,11 @@ install(FILES
 )
 install(FILES packaging/tmpfiles/wardd.conf
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/tmpfiles.d
+)
+# Debian Policy requires /usr/share/doc/<pkg>/copyright; RPM marks LICENSE with
+# %license via CPACK_RPM_USER_FILELIST in cmake/Packaging.cmake.
+install(FILES LICENSE packaging/debian/copyright
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/wardd
 )
 
 include(cmake/Packaging.cmake)

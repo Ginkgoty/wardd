@@ -52,6 +52,20 @@ int wardd_xdp_detach(
     size_t error_size
 );
 
+/*
+ * Remove pins left behind when the process that created them died without
+ * detaching. Attach refuses to reuse a pin root that is already populated, so
+ * without this a crash leaves the data plane unmanageable until an operator
+ * removes the pins by hand. Refuses to run while a wardd program is attached.
+ */
+int wardd_xdp_cleanup_pins(
+    const char *interface_name,
+    const char *pin_root,
+    size_t *removed,
+    char *error,
+    size_t error_size
+);
+
 int wardd_xdp_set_action(
     const char *interface_name,
     const char *pin_root,
@@ -67,6 +81,24 @@ int wardd_xdp_sync_geo(
     const char *snapshot_root,
     size_t *ipv4_prefixes,
     size_t *ipv6_prefixes,
+    char *error,
+    size_t error_size
+);
+
+/*
+ * Effective policy currently programmed into the pinned runtime_cfg map. This
+ * is deliberately distinct from the configured action in wardd_xdp_config:
+ * attachment always starts in observe mode, so the configured value is an
+ * administrator's intent and this one is what the kernel is doing.
+ */
+struct wardd_xdp_actions {
+    enum wardd_action geo_action;
+    enum wardd_action ban_action;
+};
+
+int wardd_xdp_read_actions(
+    const char *pin_root,
+    struct wardd_xdp_actions *actions,
     char *error,
     size_t error_size
 );

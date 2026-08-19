@@ -71,6 +71,7 @@ static void usage(FILE *stream)
         "  wardctl xdp sync-geo [--config PATH] [--state-dir PATH] [--pin-root PATH]\n"
         "  wardctl xdp metrics [--pin-root PATH]\n"
         "  wardctl xdp detach [--config PATH] [--pin-root PATH]\n"
+        "  wardctl xdp cleanup-pins [--config PATH] [--pin-root PATH]\n"
         "  wardctl ban add IP|CIDR (--duration D|--permanent) [--config PATH] [--pin-root PATH] [--ban-state PATH]\n"
         "  wardctl ban remove IP|CIDR [--config PATH] [--pin-root PATH] [--ban-state PATH]\n"
         "  wardctl ban list [--ban-state PATH]\n"
@@ -825,6 +826,23 @@ static int xdp_detach_command(const struct command_options *options)
     return EXIT_SUCCESS;
 }
 
+static int xdp_cleanup_pins_command(const struct command_options *options)
+{
+    struct wardd_config config;
+    size_t removed = 0;
+    char error[1024];
+
+    if (load_config(options->config_path, &config) != 0) return EXIT_FAILURE;
+    if (wardd_xdp_cleanup_pins(
+            config.xdp.interface, options->bpf_pin_root, &removed, error, sizeof(error)
+        ) != 0) {
+        fprintf(stderr, "wardctl: XDP pin cleanup refused or failed: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    printf("removed stale wardd BPF pins pin_root=%s removed=%zu\n", options->bpf_pin_root, removed);
+    return EXIT_SUCCESS;
+}
+
 static int xdp_set_action_command(
     const char *policy,
     const char *action_name,
@@ -1364,6 +1382,13 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             return xdp_detach_command(&options);
+        }
+        if (strcmp(operation, "cleanup-pins") == 0) {
+            if (parse_command_options(argc, argv, index + 2, &options) != 0) {
+                usage(stderr);
+                return EXIT_FAILURE;
+            }
+            return xdp_cleanup_pins_command(&options);
         }
     }
     if (strcmp(argv[index], "ban") == 0 && index + 1 < argc) {

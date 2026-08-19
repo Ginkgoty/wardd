@@ -38,6 +38,7 @@ struct daemon_runtime {
     bool event_degraded;
     bool event_paused;
     uint64_t events_processed;
+    uint64_t events_rejected_logged;
     uint64_t last_event_epoch;
     const char *auto_state;
     struct wardd_nginx_event_reader reader;
@@ -127,6 +128,23 @@ static int create_server_socket(const char *path)
     return server_fd;
 }
 
+/*
+ * Defense in depth. The socket is already created 0600 under a 0750 runtime
+ * directory, but SHUTDOWN is an unauthenticated kill switch for anyone who
+ * does reach it, and --socket can place the socket outside that directory.
+ */
+static bool peer_is_authorized(int client_fd)
+{
+    struct ucred credentials;
+    socklen_t length = sizeof(credentials);
+
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) != 0 ||
+        length != sizeof(credentials)) {
+        return false;
+    }
+    return credentials.uid == 0 || credentials.uid == geteuid();
+}
+
 static int read_request(int client_fd, char *buffer, size_t buffer_size)
 {
     size_t used = 0;
@@ -155,6 +173,45 @@ static int read_request(int client_fd, char *buffer, size_t buffer_size)
     return 0;
 }
 
+/*
+ * Attachment always programs observe mode, so config->xdp.{geo,ban}_action is
+ * the administrator's intent, not what the kernel is enforcing. Report both:
+ * a status line that echoes only the configured value tells an operator that
+ * enforcement is on while every packet is still being passed.
+ */
+enum effective_action_state {
+    EFFECTIVE_NOT_ATTACHED = 0,
+    EFFECTIVE_UNKNOWN,
+    EFFECTIVE_KNOWN,
+};
+
+static enum effective_action_state read_effective_actions(
+    const struct wardd_config *config,
+    const struct daemon_runtime *runtime,
+    struct wardd_xdp_actions *actions
+)
+{
+    struct wardd_xdp_status xdp_status;
+    const char *pin_root = runtime->paths.bpf_pin_root != NULL
+        ? runtime->paths.bpf_pin_root
+        : DEFAULT_BPF_PIN_ROOT;
+
+    if (wardd_xdp_get_status(config->xdp.interface, &xdp_status, NULL, 0) != 0) return EFFECTIVE_UNKNOWN;
+    if (!xdp_status.wardd_attached || xdp_status.legacy) return EFFECTIVE_NOT_ATTACHED;
+    if (wardd_xdp_read_actions(pin_root, actions, NULL, 0) != 0) return EFFECTIVE_UNKNOWN;
+    return EFFECTIVE_KNOWN;
+}
+
+static const char *effective_action_name(
+    enum effective_action_state state,
+    enum wardd_action action
+)
+{
+    if (state == EFFECTIVE_NOT_ATTACHED) return "not_attached";
+    if (state == EFFECTIVE_UNKNOWN) return "unknown";
+    return wardd_action_name(action);
+}
+
 static void respond_status_text(
     int client_fd,
     const struct wardd_config *config,
@@ -176,6 +233,8 @@ static void respond_status_text(
         NULL,
         0
     ) == 0;
+    struct wardd_xdp_actions effective = {WARDD_ACTION_OBSERVE, WARDD_ACTION_OBSERVE};
+    const enum effective_action_state effective_state = read_effective_actions(config, runtime, &effective);
 
     (void)dprintf(
         client_fd,
@@ -187,11 +246,12 @@ static void respond_status_text(
         "XDP attached: %s\n"
         "XDP active mode: %s\n"
         "XDP attach preference: %s\n"
-        "Geo action: %s\n"
-        "Ban action: %s\n"
+        "Geo action: %s (configured) / %s (effective)\n"
+        "Ban action: %s (configured) / %s (effective)\n"
         "Automatic ban: %s\n"
         "Nginx event ingestion: %s\n"
         "Nginx events processed: %llu\n"
+        "Nginx events rejected: %llu\n"
         "MMDB compiler: %s\n"
         "Geo snapshot: %s\n"
         "Firewall ownership: %s (unmanaged)\n"
@@ -204,10 +264,13 @@ static void respond_status_text(
         have_xdp_status && xdp_status.attached ? xdp_status.mode : "none",
         wardd_attach_mode_name(config->xdp.attach_mode),
         wardd_action_name(config->xdp.geo_action),
+        effective_action_name(effective_state, effective.geo_action),
         wardd_action_name(config->xdp.ban_action),
+        effective_action_name(effective_state, effective.ban_action),
         config->ban.automatic.enabled ? "enabled" : "disabled",
         !runtime->event_enabled ? "disabled" : runtime->event_degraded ? "degraded" : "healthy",
         (unsigned long long)runtime->events_processed,
+        (unsigned long long)runtime->reader.rejected_events,
         wardd_geo_mmdb_available() ? "available" : "unavailable",
         !have_snapshot_status || snapshot_status.current[0] == '\0' ? "not_ready" : snapshot_status.current,
         wardd_firewall_ownership_name(config->firewall.ownership)
@@ -235,6 +298,8 @@ static void respond_status_json(
         NULL,
         0
     ) == 0;
+    struct wardd_xdp_actions effective = {WARDD_ACTION_OBSERVE, WARDD_ACTION_OBSERVE};
+    const enum effective_action_state effective_state = read_effective_actions(config, runtime, &effective);
 
     (void)dprintf(
         client_fd,
@@ -243,9 +308,12 @@ static void respond_status_json(
         "\"xdp_configured\":%s,\"xdp_attached\":%s,"
         "\"xdp_mode\":\"%s\","
         "\"attach_preference\":\"%s\",\"geo_action\":\"%s\","
-        "\"ban_action\":\"%s\",\"mmdb_compiler\":%s,"
+        "\"ban_action\":\"%s\","
+        "\"geo_action_effective\":\"%s\",\"ban_action_effective\":\"%s\","
+        "\"mmdb_compiler\":%s,"
         "\"automatic_ban_enabled\":%s,\"nginx_event_ingestion\":\"%s\","
         "\"nginx_events_processed\":%llu,"
+        "\"nginx_events_rejected\":%llu,"
         "\"geo_snapshot\":\"%s\","
         "\"firewall_ownership\":\"%s\","
         "\"firewall_managed\":false,\"runtime_phase\":\"geo_xdp_control_plane\"}\n",
@@ -258,10 +326,13 @@ static void respond_status_json(
         wardd_attach_mode_name(config->xdp.attach_mode),
         wardd_action_name(config->xdp.geo_action),
         wardd_action_name(config->xdp.ban_action),
+        effective_action_name(effective_state, effective.geo_action),
+        effective_action_name(effective_state, effective.ban_action),
         wardd_geo_mmdb_available() ? "true" : "false",
         config->ban.automatic.enabled ? "true" : "false",
         !runtime->event_enabled ? "disabled" : runtime->event_degraded ? "degraded" : "healthy",
         (unsigned long long)runtime->events_processed,
+        (unsigned long long)runtime->reader.rejected_events,
         !have_snapshot_status || snapshot_status.current[0] == '\0' ? "not_ready" : snapshot_status.current,
         wardd_firewall_ownership_name(config->firewall.ownership)
     );
@@ -441,7 +512,11 @@ int main(int argc, char **argv)
                 break;
             }
             (void)fcntl(client_fd, F_SETFD, FD_CLOEXEC);
-            handle_client(client_fd, &config, &runtime);
+            if (peer_is_authorized(client_fd)) {
+                handle_client(client_fd, &config, &runtime);
+            } else {
+                (void)dprintf(client_fd, "ERROR unauthorized\n");
+            }
             (void)close(client_fd);
         }
         if (runtime.event_enabled && !runtime.event_paused) {
@@ -466,6 +541,16 @@ int main(int argc, char **argv)
             } else if (runtime.event_degraded) {
                 runtime.event_degraded = false;
                 fprintf(stderr, "wardd: Nginx event ingestion recovered\n");
+            }
+            if (runtime.reader.rejected_events > runtime.events_rejected_logged) {
+                fprintf(
+                    stderr,
+                    "wardd: skipped %llu malformed Nginx event line(s) (total %llu, last: %s)\n",
+                    (unsigned long long)(runtime.reader.rejected_events - runtime.events_rejected_logged),
+                    (unsigned long long)runtime.reader.rejected_events,
+                    runtime.reader.last_reject_reason
+                );
+                runtime.events_rejected_logged = runtime.reader.rejected_events;
             }
         }
     }

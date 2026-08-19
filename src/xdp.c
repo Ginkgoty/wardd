@@ -505,18 +505,65 @@ done:
     return return_value;
 }
 
-static void cleanup_pins(const char *pin_root)
+static size_t cleanup_pins(const char *pin_root)
 {
     char path[XDP_PATH_LEN];
     char map_directory[XDP_PATH_LEN];
+    size_t removed = 0;
 
-    if (path_join(path, sizeof(path), pin_root, "program") == 0) (void)unlink(path);
-    if (path_join(map_directory, sizeof(map_directory), pin_root, "maps") != 0) return;
+    if (path_join(path, sizeof(path), pin_root, "program") == 0 && unlink(path) == 0) removed++;
+    if (path_join(map_directory, sizeof(map_directory), pin_root, "maps") != 0) return removed;
     for (size_t index = 0; index < sizeof(map_names) / sizeof(map_names[0]); ++index) {
-        if (path_join(path, sizeof(path), map_directory, map_names[index]) == 0) (void)unlink(path);
+        if (path_join(path, sizeof(path), map_directory, map_names[index]) == 0 &&
+            unlink(path) == 0) removed++;
     }
     (void)rmdir(map_directory);
     (void)rmdir(pin_root);
+    return removed;
+}
+
+int wardd_xdp_cleanup_pins(
+    const char *interface_name,
+    const char *pin_root,
+    size_t *removed,
+    char *error,
+    size_t error_size
+)
+{
+    struct wardd_xdp_status status_info;
+    struct stat pin_status;
+
+    if (error != NULL && error_size > 0) error[0] = '\0';
+    if (interface_name == NULL || pin_root == NULL || removed == NULL) {
+        set_error(error, error_size, "interface, pin root and output are required");
+        return -1;
+    }
+    *removed = 0;
+    /*
+     * Unpinning a live program would leave it attached and unmanageable, which
+     * is strictly worse than the stale pins this command exists to clear.
+     */
+    if (wardd_xdp_get_status(interface_name, &status_info, NULL, 0) == 0 &&
+        status_info.wardd_attached) {
+        set_error(
+            error,
+            error_size,
+            "a wardd program is still attached to %s; detach it before clearing pins",
+            interface_name
+        );
+        return -1;
+    }
+    if (lstat(pin_root, &pin_status) != 0) {
+        if (errno == ENOENT) return 0;
+        set_error(error, error_size, "cannot inspect wardd BPF pin root: %s", strerror(errno));
+        return -1;
+    }
+    if (!S_ISDIR(pin_status.st_mode)) {
+        set_error(error, error_size, "wardd BPF pin root is not a directory");
+        return -1;
+    }
+    *removed = cleanup_pins(pin_root);
+    return 0;
 }
 
 static int pin_loaded_object(
@@ -871,6 +918,58 @@ done:
     if (inner_v4 >= 0) (void)close(inner_v4);
     if (inner_v6 >= 0) (void)close(inner_v6);
     xdp_program__close(program);
+    return return_value;
+}
+
+int wardd_xdp_read_actions(
+    const char *pin_root,
+    struct wardd_xdp_actions *actions,
+    char *error,
+    size_t error_size
+)
+{
+    struct bpf_map_info info = {.key_size = 0};
+    __u32 info_length = sizeof(info);
+    struct wardd_runtime_config runtime;
+    char map_path[XDP_PATH_LEN];
+    const __u32 zero = 0;
+    int map = -1;
+    int return_value = -1;
+
+    if (error != NULL && error_size > 0) error[0] = '\0';
+    if (pin_root == NULL || actions == NULL ||
+        snprintf(map_path, sizeof(map_path), "%s/maps/runtime_cfg", pin_root) >= (int)sizeof(map_path)) {
+        set_error(error, error_size, "runtime pin path and output are required");
+        return -1;
+    }
+    map = bpf_obj_get(map_path);
+    if (map < 0 || bpf_obj_get_info_by_fd(map, &info, &info_length) != 0) {
+        set_error(error, error_size, "cannot open pinned runtime policy: %s", strerror(errno));
+        goto done;
+    }
+    if (info.type != BPF_MAP_TYPE_ARRAY || info.key_size != sizeof(__u32) ||
+        info.value_size != sizeof(struct wardd_runtime_config) || info.max_entries != 1) {
+        set_error(error, error_size, "pinned runtime map has an incompatible schema");
+        goto done;
+    }
+    if (bpf_map_lookup_elem(map, &zero, &runtime) != 0) {
+        set_error(error, error_size, "cannot read pinned runtime policy: %s", strerror(errno));
+        goto done;
+    }
+    if (runtime.geo_action > WARDD_RUNTIME_ENFORCE || runtime.ban_action > WARDD_RUNTIME_ENFORCE) {
+        set_error(error, error_size, "pinned runtime policy holds an unknown action");
+        goto done;
+    }
+    actions->geo_action = runtime.geo_action == WARDD_RUNTIME_ENFORCE
+        ? WARDD_ACTION_ENFORCE
+        : WARDD_ACTION_OBSERVE;
+    actions->ban_action = runtime.ban_action == WARDD_RUNTIME_ENFORCE
+        ? WARDD_ACTION_ENFORCE
+        : WARDD_ACTION_OBSERVE;
+    return_value = 0;
+
+done:
+    if (map >= 0) (void)close(map);
     return return_value;
 }
 

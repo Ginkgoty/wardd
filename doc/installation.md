@@ -340,13 +340,30 @@ sudo wardctl geo rollback --reload
 sudo wardctl status --json
 sudo wardctl xdp metrics
 sudo journalctl -u wardd.service
+
+# Clear pins left behind if wardd died without detaching. Refuses to run while
+# a wardd program is still attached, so detach first if that is the intent.
+sudo wardctl xdp cleanup-pins
 ```
 
+`wardctl status` reports each policy twice, as
+`<configured> (configured) / <effective> (effective)`. The configured value is
+what `wardd.toml` asks for; the effective value is what the kernel is actually
+doing, read from the live BPF map. They differ on purpose after an attach,
+because attachment always begins in observe mode: `enforce (configured) /
+observe (effective)` means enforcement has not been switched on yet. An
+effective value of `not_attached` means no wardd program is on the interface.
+
 Do not use a generic XDP deletion command to clear the interface, and do not
-automatically rewrite host or cloud firewall rules during diagnosis. If the
-Nginx event cursor or event format is corrupt, automatic-ban ingestion enters
-`degraded`; existing bans remain active, and the daemon must be restarted
-after the cause is corrected before new automatic bans resume.
+automatically rewrite host or cloud firewall rules during diagnosis.
+
+Malformed lines in the Nginx event log are skipped and counted, not fatal:
+`wardctl status` reports them as `Nginx events rejected` and the daemon logs a
+summary with the last rejection reason. Ingestion continues. If instead a
+decision cannot be applied at all — for example durable ban state cannot be
+written — ingestion is marked `degraded` and paused; existing bans remain
+active, and the daemon must be restarted after the cause is corrected before
+new automatic bans resume.
 
 Before removing a package, explicitly detach wardd while `wardctl` is still
 installed:
@@ -362,5 +379,15 @@ sudo apt remove wardd
 sudo dnf remove wardd
 ```
 
-Package removal stops the daemon but does not implicitly detach XDP or delete
-administrator configuration and persistent policy state.
+Package removal stops the daemon and the GeoIP timer, and makes one best-effort
+attempt to detach wardd's XDP program and clear its BPF pins while `wardctl` is
+still on disk. That attempt is a safety net, not a substitute for detaching
+deliberately: it is skipped when `/etc/wardd/wardd.toml` is absent, and it
+cannot report failure through the package manager. Detach explicitly first, as
+shown above, and confirm with `wardctl xdp status` before removing.
+
+Removal never deletes administrator configuration (`/etc/wardd/wardd.toml`) or
+persistent policy state. `/var/lib/wardd` — durable bans, policy snapshots and
+the audit log — is preserved even on `apt purge` or `dnf remove`, because an
+operator may still need it afterwards. Remove it by hand when that is
+intended.
