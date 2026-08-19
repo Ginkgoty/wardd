@@ -41,7 +41,7 @@ jobs:
       WARDD_BUILD_ID: ${{ inputs.build_id }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Ubuntu build dependencies
         run: |
@@ -92,7 +92,7 @@ jobs:
           sudo apt-get remove --yes wardd
 
       - name: Upload DEB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wardd-${{ inputs.channel }}-deb-${{ matrix.arch }}
           path: build/packages/*.deb
@@ -110,7 +110,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    container: rockylinux:9
+    container: rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6
     env:
       WARDD_CHANNEL: ${{ inputs.channel }}
       WARDD_BUILD_ID: ${{ inputs.build_id }}
@@ -129,7 +129,7 @@ jobs:
             openssl-devel pkgconf-pkg-config python3 rpm-build sudo
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure
         run: |
@@ -170,7 +170,7 @@ jobs:
           test ! -e /etc/wardd/wardd.toml   # installation stays passive
 
       - name: Upload RPM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wardd-${{ inputs.channel }}-rpm-${{ matrix.arch }}
           path: build/packages/*.rpm

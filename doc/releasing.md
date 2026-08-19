@@ -76,11 +76,29 @@ The stable workflow enforces three additional invariants:
 
 ## Create a stable release
 
-Run the validator from a clean checkout at the intended commit:
+Run the validator from a clean checkout at the intended commit. The checkout
+has no `build/` directory yet, so configure and build before testing:
 
 ```sh
 scripts/validate-release-tag.sh v0.1.0
-ctest --test-dir build --output-on-failure
+
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DWARDD_BUILD_BPF=ON \
+  -DWARDD_ENABLE_RUNTIME_TESTS=ON \
+  -DWARDD_ENABLE_PRIVILEGED_TESTS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure -E xdp_netns
+sudo ctest --test-dir build --output-on-failure -R xdp_netns
+```
+
+`scripts/validate-release-tag.sh` checks two of the three invariants: the tag
+format and the match against the CMake project version. The third — that the
+tagged commit is contained in `origin/main` — is enforced only in the workflow
+(`.github/workflows/release.yml`). Confirm it locally with:
+
+```sh
+git merge-base --is-ancestor HEAD origin/main && echo "commit is on main"
 ```
 
 Prefer a signed annotated tag. The push starts the stable workflow:

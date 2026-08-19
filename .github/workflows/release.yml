@@ -20,7 +20,7 @@ jobs:
       version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Check out complete history
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -57,7 +57,7 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: wardd-stable-*
           path: release-assets
@@ -72,7 +72,7 @@ jobs:
           sha256sum --check SHA256SUMS
 
       - name: Attest released packages
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: release-assets/SHA256SUMS
 
