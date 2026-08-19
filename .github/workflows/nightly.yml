@@ -76,6 +76,7 @@ jobs:
       - name: Replace nightly release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           BUILD_ID: ${{ needs.metadata.outputs.build_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
