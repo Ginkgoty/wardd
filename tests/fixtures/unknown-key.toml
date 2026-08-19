@@ -1,0 +1,20 @@
+version = 1
+
+[geo]
+country = "CN"
+provider = "mmdb"
+url = "https://rules.example.test/country-lite.mmdb"
+checksum_url = "https://rules.example.test/country-lite.mmdb.sha256sum"
+update_interval = "24h"
+max_age = "14d"
+max_download_size = "32MiB"
+max_change_ratio = 0.20
+
+[xdp]
+enabled = true
+interface = "eth0"
+attach_mode = "auto"
+generic_fallback = false
+geo_action = "observe"
+ban_action = "enforce"
+surprise = true

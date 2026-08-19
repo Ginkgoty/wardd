@@ -1,0 +1,296 @@
+# Installation and deployment
+
+This guide describes installation from the current source tree. Native RPM
+and DEB packages are not yet available. For production use, pin a source
+version or commit and create auditable installation artifacts in a build
+environment equivalent to the target host.
+
+## 1. Prerequisites and boundaries
+
+- The eBPF/XDP capability baseline is Linux 5.15 LTS. Runtime capability
+  checks and `wardctl doctor` results take precedence over version-string
+  comparisons.
+- The current BPF build supports x86_64 and aarch64 targets.
+- XDP operations, BPF pins, system state directories, and service installation
+  require root privileges.
+- Nginx provides the GeoIP server include point and the automatic-ban event
+  adapter. wardd does not own the administrator's `nginx.conf`,
+  `limit_req_zone`, rate, `burst`, or location selection.
+- wardd never modifies nftables, firewalld, ufw, or cloud security groups.
+  Existing firewall controls must preserve the management port before wardd
+  is installed.
+- A remote host must have cloud-console, serial-console, or equivalent
+  out-of-band recovery before any XDP policy is changed to `enforce`.
+
+## 2. Install build dependencies
+
+### Ubuntu 24.04
+
+```sh
+sudo apt update
+sudo apt install -y \
+  build-essential cmake clang pkg-config \
+  libbpf-dev libxdp-dev libmaxminddb-dev \
+  libcurl4-openssl-dev libssl-dev nginx
+```
+
+If the distribution repositories do not provide suitable libxdp/libbpf
+packages, use distribution backports or build the dependencies in an isolated
+environment. Do not install them through an untrusted remote script.
+
+Ubuntu 22.04 uses a 5.15 LTS kernel and therefore meets the kernel capability
+baseline, but its official repositories do not provide the same
+`libxdp-dev` installation path as Ubuntu 24.04. This prerelease does not yet
+vendor libxdp or ship an Ubuntu 22.04 package. On that release, an
+administrator must build and package libxdp from a trusted xdp-tools source,
+then validate it before installing wardd. Do not treat the Ubuntu 24.04
+dependency command as a validated Ubuntu 22.04 procedure.
+
+### RHEL 9.1+
+
+`libxdp-devel` and `libmaxminddb-devel` are in CodeReady Linux Builder. Enable
+the repository for the subscription architecture, then install the build
+dependencies:
+
+```sh
+sudo subscription-manager repos \
+  --enable="codeready-builder-for-rhel-9-$(arch)-rpms"
+sudo dnf install -y \
+  gcc gcc-c++ make cmake clang pkgconf-pkg-config \
+  libbpf-devel libxdp-devel libmaxminddb-devel \
+  libcurl-devel openssl-devel nginx
+```
+
+Repository names can differ between subscriptions and internal mirrors. Use
+`dnf repoquery <package>` to confirm the source before installation. Do not
+replace the system kernel or disable SELinux to build wardd. This source tree
+does not yet include a wardd SELinux policy, so production deployment requires
+policy auditing on the target system.
+
+For distribution package availability, see the
+[Ubuntu libxdp-dev package search](https://packages.ubuntu.com/libxdp-dev) and
+[RHEL 9 package and repository changes](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html-single/considerations_in_adopting_rhel_9/considerations_in_adopting_rhel_9).
+
+## 3. Build and test
+
+Set `/usr/lib` explicitly so that the current CMake installation places
+systemd units in a location recognized by both target distribution families:
+
+```sh
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr \
+  -DCMAKE_INSTALL_LIBDIR=lib \
+  -DCMAKE_INSTALL_SYSCONFDIR=/etc \
+  -DWARDD_BUILD_BPF=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+`WARDD_BUILD_BPF=ON` builds `wardd.bpf.o` with clang. Developers can add
+`-DWARDD_ENABLE_RUNTIME_TESTS=ON` to enable the daemon-event and live
+Nginx-event tests. Integration tests that require a real MMDB also need
+`-DWARDD_TEST_MMDB_PATH=/absolute/path/to/country-lite.mmdb`. When Nginx is
+available, related tests execute `nginx -t` against isolated temporary
+configurations.
+
+Do not omit `CMAKE_INSTALL_SYSCONFDIR=/etc`. The production configuration path
+used by the program and systemd unit is `/etc/wardd/wardd.toml`; setting only
+the prefix to `/usr` would otherwise place CMake's relative `etc` directory
+under `/usr/etc`.
+
+## 4. Install files
+
+```sh
+sudo cmake --install build
+sudo install -d -m 0750 /etc/wardd
+sudo install -m 0640 config/wardd.toml.example /etc/wardd/wardd.toml
+sudo systemd-tmpfiles --create wardd.conf
+sudo systemctl daemon-reload
+```
+
+CMake installs the following files:
+
+| Content | Default location |
+|---|---|
+| `wardd`, `wardctl` | `/usr/sbin/` |
+| XDP object | `/usr/lib/wardd/wardd.bpf.o` |
+| Example configuration | `/etc/wardd/wardd.toml.example` |
+| systemd units | `/usr/lib/systemd/system/` |
+| tmpfiles configuration | `/usr/lib/tmpfiles.d/wardd.conf` |
+
+Installation never overwrites the administrator-owned
+`/etc/wardd/wardd.toml`; the explicit copy above is required on first
+installation. Runtime data is stored under `/run/wardd`, persistent state
+under `/var/lib/wardd`, and BPF pins under `/sys/fs/bpf/wardd` by default.
+
+## 5. Configure and inspect the host
+
+Edit the network interface, protected endpoints, Nginx paths, and ban ports:
+
+```sh
+sudo editor /etc/wardd/wardd.toml
+sudo wardctl config validate /etc/wardd/wardd.toml
+sudo wardctl doctor
+```
+
+See the [TOML configuration reference](configuration.md) for every field.
+Keep the following settings during the first rollout:
+
+```toml
+[xdp]
+geo_action = "observe"
+ban_action = "observe"
+
+[ban.auto]
+enabled = false
+
+[firewall]
+manage = false
+```
+
+## 6. Initialize GeoIP policy
+
+```sh
+sudo wardctl geo update
+sudo wardctl geo status
+```
+
+The `snapshot=<ID>` value in the output identifies the new snapshot. The first
+valid snapshot is approved automatically, but an administrator must still
+activate it explicitly:
+
+```sh
+sudo wardctl geo activate <SNAPSHOT_ID>
+```
+
+Later updates are compared with the current snapshot. A change greater than
+`geo.max_change_ratio` enters `pending_review`:
+
+```sh
+sudo wardctl geo diff <SNAPSHOT_ID>
+sudo wardctl geo approve <SNAPSHOT_ID>
+sudo wardctl geo activate <SNAPSHOT_ID>
+```
+
+Without `--reload`, `activate` only switches wardd-managed policy links. With
+`--reload`, it also performs a live `nginx -t` and reload inside the policy
+transaction, rolling back on failure.
+
+## 7. Integrate Nginx
+
+After snapshot activation, `nginx.generated_dir` contains:
+
+- `wardd-geo.conf`: include in the `http` context; defines the GeoIP variable
+  and restricted event log format.
+- `wardd-cn-only.conf`: include in every `server` that requires the regional
+  restriction.
+- `current/nginx-cn.conf`: the address table generated by the active GeoIP
+  snapshot.
+
+Administrator-owned configuration example:
+
+```nginx
+http {
+    limit_req_zone $binary_remote_addr zone=wardd_default:10m rate=10r/s;
+    include /etc/wardd/generated/wardd-geo.conf;
+
+    server {
+        listen 443 ssl;
+        server_name service.example.com;
+
+        include /etc/wardd/generated/wardd-cn-only.conf;
+
+        location /api/ {
+            limit_req zone=wardd_default burst=20;
+            proxy_pass http://127.0.0.1:8080;
+        }
+    }
+}
+```
+
+`nginx.limit_zone` must match the zone name above. wardd logs only rate-limit
+events whose status is exactly `REJECTED`. The format excludes the URI, query,
+headers, cookies, request/response bodies, and credentials.
+
+```sh
+sudo wardctl nginx render
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+To enable automatic banning, first complete the live Nginx test above. Then
+set `ban.auto.enabled = true`, validate the configuration again, and restart
+wardd.
+
+## 8. Start the control plane
+
+```sh
+sudo systemctl enable --now wardd.service
+sudo systemctl status wardd.service
+sudo wardctl status
+```
+
+The optional daily GeoIP timer creates snapshots but never activates them:
+
+```sh
+sudo systemctl enable --now wardd-geo-update.timer
+systemctl list-timers wardd-geo-update.timer
+```
+
+## 9. Stage the XDP rollout
+
+Daemon startup never attaches XDP. Attach it explicitly in observation mode:
+
+```sh
+sudo wardctl xdp status
+sudo wardctl xdp attach --observe
+sudo wardctl xdp sync-geo
+sudo wardctl xdp metrics
+```
+
+Verify all of the following before enabling enforcement:
+
+1. The physical ingress interface sees the real client source address; an
+   upstream proxy or tunnel has not replaced it.
+2. `xdp.geo_endpoint` contains only addresses and ports that require regional
+   restriction.
+3. `ban.protected_tcp_ports` matches the intended service ports.
+4. CN and non-CN traffic, over both IPv4 and IPv6, behaves as expected.
+5. Outbound connections from the service to `service.external.com` work.
+6. The out-of-band recovery channel is operational.
+
+```sh
+sudo wardctl xdp set-action geo enforce
+sudo wardctl xdp set-action ban enforce
+sudo wardctl xdp metrics
+```
+
+Attachment uses the libxdp dispatcher and refuses to replace a legacy XDP
+program that cannot be identified safely. Detachment likewise removes only
+wardd's own program.
+
+## 10. Roll back and diagnose
+
+```sh
+# Stop enforcement while retaining the program and counters
+sudo wardctl xdp set-action geo observe
+sudo wardctl xdp set-action ban observe
+
+# Or remove wardd from XDP completely
+sudo wardctl xdp detach
+
+# Return to the previous GeoIP snapshot and reload Nginx transactionally
+sudo wardctl geo rollback --reload
+
+# Inspect state
+sudo wardctl status --json
+sudo wardctl xdp metrics
+sudo journalctl -u wardd.service
+```
+
+Do not use a generic XDP deletion command to clear the interface, and do not
+automatically rewrite host or cloud firewall rules during diagnosis. If the
+Nginx event cursor or event format is corrupt, automatic-ban ingestion enters
+`degraded`; existing bans remain active, and the daemon must be restarted
+after the cause is corrected before new automatic bans resume.

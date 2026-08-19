@@ -1,0 +1,161 @@
+#include "wardd/nginx_events.h"
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int failures;
+
+#define CHECK(condition, message) \
+    do { \
+        if (!(condition)) { \
+            fprintf(stderr, "FAIL: %s (line %d)\n", (message), __LINE__); \
+            failures++; \
+        } \
+    } while (0)
+
+struct handler_context {
+    size_t count;
+    char last_request[WARDD_AUTO_EVENT_FIELD_LEN];
+};
+
+static int handle_event(
+    const struct wardd_auto_ban_event *event,
+    void *opaque,
+    char *error,
+    size_t error_size
+)
+{
+    struct handler_context *context = opaque;
+    (void)error;
+    (void)error_size;
+    context->count++;
+    (void)snprintf(context->last_request, sizeof(context->last_request), "%s", event->request_id);
+    return 0;
+}
+
+static int write_text(const char *path, const char *mode, const char *text)
+{
+    FILE *file = fopen(path, mode);
+    if (file == NULL) return -1;
+    if (fputs(text, file) == EOF || fflush(file) != 0) {
+        (void)fclose(file);
+        return -1;
+    }
+    return fclose(file);
+}
+
+static void make_line(char *output, size_t output_size, const char *request_id, unsigned long long epoch)
+{
+    (void)snprintf(
+        output,
+        output_size,
+        "{\"schema\":1,\"peer\":\"8.8.4.4\",\"server\":\"service.example.com\","
+        "\"zone\":\"api\",\"status\":\"REJECTED\",\"request_id\":\"%s\","
+        "\"epoch\":\"%llu.123\"}\n",
+        request_id,
+        epoch
+    );
+}
+
+int main(void)
+{
+    char directory[] = "/tmp/wardd-nginx-events-test-XXXXXX";
+    char log_path[512];
+    char old_path[512];
+    char cursor_path[512];
+    char cursor_lock[1024];
+    char delayed_log[512];
+    char delayed_cursor[512];
+    char line[1024];
+    char error[1024];
+    struct wardd_nginx_event_reader reader;
+    struct wardd_auto_ban_event parsed;
+    struct handler_context handled = {0};
+    size_t processed;
+
+    CHECK(mkdtemp(directory) != NULL, "create Nginx event test directory");
+    (void)snprintf(log_path, sizeof(log_path), "%s/events.log", directory);
+    (void)snprintf(old_path, sizeof(old_path), "%s/events.log.1", directory);
+    (void)snprintf(cursor_path, sizeof(cursor_path), "%s/state/cursor", directory);
+    (void)snprintf(cursor_lock, sizeof(cursor_lock), "%s.lock", cursor_path);
+    (void)snprintf(delayed_log, sizeof(delayed_log), "%s/delayed.log", directory);
+    (void)snprintf(delayed_cursor, sizeof(delayed_cursor), "%s/state/delayed.cursor", directory);
+    make_line(line, sizeof(line), "preexisting", 1000);
+    CHECK(write_text(log_path, "wx", line) == 0, "write preexisting event");
+    CHECK(wardd_nginx_event_reader_init(&reader, log_path, cursor_path, error, sizeof(error)) == 0, error);
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0, error);
+    CHECK(processed == 0 && handled.count == 0, "first start tails without replaying old log");
+
+    make_line(line, sizeof(line), "partial", 1001);
+    const size_t split = strlen(line) / 2U;
+    char saved = line[split];
+    line[split] = '\0';
+    CHECK(write_text(log_path, "a", line) == 0, "append partial event prefix");
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0 && processed == 0,
+        "partial line is retained without processing");
+    line[split] = saved;
+    CHECK(write_text(log_path, "a", line + split) == 0, "append partial event suffix");
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0, error);
+    CHECK(processed == 1 && strcmp(handled.last_request, "partial") == 0, "complete partial event once");
+
+    wardd_nginx_event_reader_close(&reader);
+    CHECK(wardd_nginx_event_reader_init(&reader, log_path, cursor_path, error, sizeof(error)) == 0, error);
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0 && processed == 0,
+        "persistent cursor prevents restart replay");
+
+    make_line(line, sizeof(line), "copytruncate", 1002);
+    CHECK(write_text(log_path, "w", line) == 0, "copytruncate event log");
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0, error);
+    CHECK(processed == 1 && strcmp(handled.last_request, "copytruncate") == 0,
+        "copytruncate resets cursor safely");
+
+    CHECK(rename(log_path, old_path) == 0, "rotate event log by rename");
+    make_line(line, sizeof(line), "rotated", 1003);
+    CHECK(write_text(log_path, "wx", line) == 0, "create rotated event log");
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0 && processed == 0,
+        "rotation waits for a stable old-file EOF");
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0, error);
+    CHECK(processed == 1 && strcmp(handled.last_request, "rotated") == 0, "rename rotation reopens new log");
+
+    make_line(line, sizeof(line), "parse", 1004);
+    line[strlen(line) - 1] = '\0';
+    CHECK(wardd_nginx_event_parse(line, &parsed, error, sizeof(error)) == 0, error);
+    CHECK(parsed.confirmed_peer && parsed.limiter_rejected && parsed.event_realtime_seconds == 1004,
+        "strict schema parser extracts trusted fields");
+    CHECK(wardd_nginx_event_parse("{\"schema\":2}", &parsed, error, sizeof(error)) != 0,
+        "reject unknown event schema");
+
+    wardd_nginx_event_reader_close(&reader);
+    CHECK(wardd_nginx_event_reader_init(&reader, delayed_log, delayed_cursor, error, sizeof(error)) == 0, error);
+    errno = 0;
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) != 0 && errno == ENOENT,
+        "missing log is retryable");
+    make_line(line, sizeof(line), "delayed", 1005);
+    CHECK(write_text(delayed_log, "wx", line) == 0, "create delayed event log");
+    CHECK(wardd_nginx_event_reader_step(
+        &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0 && processed == 1 &&
+        strcmp(handled.last_request, "delayed") == 0,
+        "new log after startup is read from the beginning");
+    wardd_nginx_event_reader_close(&reader);
+    (void)unlink(log_path);
+    (void)unlink(old_path);
+    (void)unlink(delayed_log);
+    (void)unlink(delayed_cursor);
+    (void)unlink(cursor_path);
+    (void)unlink(cursor_lock);
+    (void)snprintf(log_path, sizeof(log_path), "%s/state", directory);
+    (void)rmdir(log_path);
+    (void)rmdir(directory);
+    return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}

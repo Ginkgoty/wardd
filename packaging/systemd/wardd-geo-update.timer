@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily wardd GeoIP snapshot check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=2h
+AccuracySec=15m
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+/build/
+/build-*/
+*.o
+*.a
+*.so
+*.swp
+compile_commands.json
+
+# Private design notes are not part of the public source distribution.
+/plan.md

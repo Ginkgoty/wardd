@@ -1,0 +1,36 @@
+version = 1
+
+[geo]
+country = "CN"
+provider = "mmdb"
+url = "https://rules.example.test/country-lite.mmdb"
+checksum_url = "https://rules.example.test/country-lite.mmdb.sha256sum"
+update_interval = "24h"
+max_age = "14d"
+max_download_size = "32MiB"
+max_change_ratio = 0.20
+
+[xdp]
+enabled = true
+interface = "eth0"
+attach_mode = "auto"
+generic_fallback = false
+geo_action = "observe"
+ban_action = "observe"
+
+[[xdp.geo_endpoint]]
+address = "*"
+protocol = "udp"
+port = 443
+
+[ban]
+protected_tcp_ports = [80, 443]
+
+[nginx]
+enabled = false
+generated_dir = "/etc/wardd/generated"
+limit_event_log = "/var/log/nginx/wardd-limit.log"
+
+[firewall]
+ownership = "none"
+manage = false

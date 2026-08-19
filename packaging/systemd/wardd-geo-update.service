@@ -1,0 +1,14 @@
+[Unit]
+Description=Download and stage a wardd GeoIP snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/wardctl geo update
+UMask=0077
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/wardd

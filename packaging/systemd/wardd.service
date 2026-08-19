@@ -1,0 +1,27 @@
+[Unit]
+Description=wardd lightweight edge firewall
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/wardd --config /etc/wardd/wardd.toml --socket /run/wardd/wardd.sock
+ExecStop=/usr/sbin/wardctl --socket /run/wardd/wardd.sock shutdown
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=wardd
+RuntimeDirectoryMode=0750
+StateDirectory=wardd
+StateDirectoryMode=0750
+UMask=0027
+LimitMEMLOCK=infinity
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ReadWritePaths=/run/wardd /var/lib/wardd -/etc/wardd/generated -/sys/fs/bpf/wardd
+
+[Install]
+WantedBy=multi-user.target

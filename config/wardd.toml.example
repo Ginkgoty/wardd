@@ -1,0 +1,48 @@
+version = 1
+
+[geo]
+country = "CN"
+provider = "mmdb"
+url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
+checksum_url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb.sha256sum"
+update_interval = "24h"
+max_age = "14d"
+max_download_size = "32MiB"
+max_change_ratio = 0.20
+
+[xdp]
+enabled = true
+interface = "eth0"
+attach_mode = "auto"
+generic_fallback = false
+geo_action = "observe"
+ban_action = "enforce"
+
+[[xdp.geo_endpoint]]
+address = "*"
+protocol = "tcp"
+port = 443
+
+[ban]
+protected_tcp_ports = [22, 80, 443]
+exempt = []
+
+[ban.auto]
+enabled = false
+event_source = "nginx_limit_req"
+window = "60s"
+rejections = 100
+first_duration = "10m"
+second_duration = "1h"
+third_duration = "24h"
+strike_retention = "7d"
+
+[nginx]
+enabled = true
+generated_dir = "/etc/wardd/generated"
+limit_event_log = "/var/log/nginx/wardd-limit.log"
+limit_zone = "wardd_default"
+
+[firewall]
+ownership = "external"
+manage = false
