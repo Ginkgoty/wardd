@@ -1,5 +1,8 @@
 # wardd
 
+[![Nightly](https://github.com/Ginkgoty/wardd/actions/workflows/nightly.yml/badge.svg?branch=main)](https://github.com/Ginkgoty/wardd/actions/workflows/nightly.yml)
+[![Stable release](https://github.com/Ginkgoty/wardd/actions/workflows/release.yml/badge.svg)](https://github.com/Ginkgoty/wardd/actions/workflows/release.yml)
+
 `wardd` is a lightweight protection control plane for Linux edge nodes. It
 compiles reviewed GeoIP data into policies consumed by XDP and Nginx, and
 turns Nginx `limit_req` rejection events into stateful, durable IP bans. The
@@ -9,8 +12,9 @@ groups.
 
 The current version implements GeoIP policy transactions, Nginx integration,
 the XDP GeoIP/ban data plane, manual bans, automatic bans, persistence, and
-tests. It is still a prerelease: native RPM/DEB packages, SELinux/AppArmor
-policies, and complete RHEL/Ubuntu VM release validation remain to be done.
+tests. GitHub Actions builds native DEB and RPM packages for x86-64 and arm64.
+SELinux/AppArmor policies and complete RHEL/Ubuntu VM release validation remain
+release-gating responsibilities.
 
 ## Architecture
 
@@ -45,10 +49,37 @@ an administrator must explicitly switch a policy to `enforce`.
 
 ## Quickstart
 
-The following flow installs from source under `/usr`. Before starting, confirm
-that out-of-band recovery is available and preserve SSH access in the cloud
-console or existing host firewall. See the [installation guide](doc/installation.md)
-for complete dependencies, RHEL/Ubuntu differences, and rollback procedures.
+Stable and nightly packages are available from
+[GitHub Releases](https://github.com/Ginkgoty/wardd/releases). Stable releases
+use `vX.Y.Z`; the mutable `nightly` prerelease tracks the latest successful
+`main` build. Verify `SHA256SUMS`, then install the package matching the host:
+
+```sh
+# Ubuntu 24.04
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./wardd_<VERSION>_<ARCH>.deb
+
+# RHEL/Rocky 9
+sha256sum --ignore-missing --check SHA256SUMS
+sudo dnf install ./wardd-<VERSION>.<ARCH>.rpm
+```
+
+Packages do not create the active configuration, start the daemon, or attach
+XDP. Copy and review the example first:
+
+```sh
+sudo install -d -m 0750 /etc/wardd
+sudo install -m 0640 /etc/wardd/wardd.toml.example /etc/wardd/wardd.toml
+sudo editor /etc/wardd/wardd.toml
+sudo wardctl config validate /etc/wardd/wardd.toml
+sudo wardctl doctor
+```
+
+Before starting, confirm that out-of-band recovery is available and preserve
+SSH access in the cloud console or existing host firewall. The following flow
+is the equivalent source build under `/usr`; see the
+[installation guide](doc/installation.md) for package dependencies,
+RHEL/Ubuntu differences, and rollback procedures.
 
 ```sh
 cmake -S . -B build \
@@ -133,6 +164,8 @@ sudo wardctl xdp detach
   installation, Nginx, systemd, staged XDP rollout, and rollback.
 - [TOML configuration reference](doc/configuration.md): every schema 1 field,
   constraint, and security semantic.
+- [Release process](doc/releasing.md): nightly semantics, stable versioning,
+  release gates, tag creation, artifacts, and recovery from failed releases.
 
 ## Common operations
 

@@ -1,0 +1,7 @@
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create wardd.conf || true
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi

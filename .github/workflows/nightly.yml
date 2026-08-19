@@ -1,0 +1,101 @@
+name: Nightly
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Compute nightly version
+    runs-on: ubuntu-24.04
+    outputs:
+      build_id: ${{ steps.version.outputs.build_id }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+      timestamp: ${{ steps.version.outputs.timestamp }}
+    steps:
+      - name: Require the main branch
+        env:
+          CURRENT_REF: ${{ github.ref }}
+        run: test "$CURRENT_REF" = refs/heads/main
+
+      - name: Compute identifiers
+        id: version
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          timestamp="$(date -u +%Y%m%d%H%M)"
+          short_sha="${COMMIT_SHA:0:12}"
+          echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "build_id=$timestamp.$short_sha" >> "$GITHUB_OUTPUT"
+
+  packages:
+    name: Build nightly packages
+    needs: metadata
+    permissions:
+      contents: read
+    uses: ./.github/workflows/_packages.yml
+    with:
+      channel: nightly
+      build_id: ${{ needs.metadata.outputs.build_id }}
+      retention_days: 7
+
+  publish:
+    name: Replace nightly prerelease
+    needs:
+      - metadata
+      - packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wardd-nightly-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify assets and create checksums
+        run: |
+          test "$(find release-assets -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 2
+          test "$(find release-assets -maxdepth 1 -type f -name '*.rpm' | wc -l)" -eq 2
+          cd release-assets
+          sha256sum ./*.deb ./*.rpm > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Replace nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+          BUILD_ID: ${{ needs.metadata.outputs.build_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release delete nightly --cleanup-tag --yes
+          fi
+
+          printf '%s\n' \
+            'Automated prerelease from the latest successful main build.' \
+            '' \
+            "- Build: $BUILD_ID" \
+            "- Commit: $COMMIT_SHA" \
+            "- Workflow: $RUN_URL" \
+            '' \
+            'Nightly artifacts are replaced on every successful main build and may be unstable.' \
+            > nightly-notes.md
+
+          gh release create nightly release-assets/* \
+            --target "$COMMIT_SHA" \
+            --title "Nightly $BUILD_ID" \
+            --notes-file nightly-notes.md \
+            --prerelease

@@ -4,6 +4,7 @@ project(
     wardd
     VERSION 0.1.0
     DESCRIPTION "A lightweight Linux edge firewall control plane"
+    HOMEPAGE_URL "https://github.com/Ginkgoty/wardd"
     LANGUAGES C
 )
 
@@ -21,6 +22,26 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(WARDD_PACKAGE_CHANNEL "stable" CACHE STRING "Package channel: stable or nightly")
+set_property(CACHE WARDD_PACKAGE_CHANNEL PROPERTY STRINGS stable nightly)
+set(WARDD_PACKAGE_BUILD_ID "" CACHE STRING "Nightly build identifier (UTC timestamp.commit)")
+
+if(WARDD_PACKAGE_CHANNEL STREQUAL "stable")
+    if(WARDD_PACKAGE_BUILD_ID)
+        message(FATAL_ERROR "WARDD_PACKAGE_BUILD_ID must be empty for stable builds")
+    endif()
+    set(WARDD_BUILD_VERSION "${PROJECT_VERSION}")
+elseif(WARDD_PACKAGE_CHANNEL STREQUAL "nightly")
+    if(NOT WARDD_PACKAGE_BUILD_ID MATCHES "^[0-9]+[.][0-9a-f]+$")
+        message(FATAL_ERROR
+            "Nightly builds require WARDD_PACKAGE_BUILD_ID=<UTC timestamp>.<commit>"
+        )
+    endif()
+    set(WARDD_BUILD_VERSION "${PROJECT_VERSION}-nightly.${WARDD_PACKAGE_BUILD_ID}")
+else()
+    message(FATAL_ERROR "WARDD_PACKAGE_CHANNEL must be stable or nightly")
+endif()
 
 option(WARDD_BUILD_BPF "Build the XDP BPF object (requires clang and libbpf headers)" OFF)
 option(WARDD_ENABLE_RUNTIME_TESTS "Enable tests requiring local Unix socket operations" OFF)
@@ -260,3 +281,5 @@ install(FILES
 install(FILES packaging/tmpfiles/wardd.conf
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/tmpfiles.d
 )
+
+include(cmake/Packaging.cmake)

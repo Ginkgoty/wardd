@@ -1,0 +1,143 @@
+name: Build Linux packages
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Package channel (stable or nightly)
+        required: true
+        type: string
+      build_id:
+        description: Nightly build identifier; empty for stable builds
+        required: false
+        default: ""
+        type: string
+      retention_days:
+        description: Workflow artifact retention period
+        required: false
+        default: 7
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: DEB / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      WARDD_CHANNEL: ${{ inputs.channel }}
+      WARDD_BUILD_ID: ${{ inputs.build_id }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Ubuntu build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential ca-certificates clang cmake dpkg-dev \
+            libbpf-dev libcurl4-openssl-dev libmaxminddb-dev libssl-dev \
+            libxdp-dev pkg-config
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_SYSCONFDIR=/etc \
+            -DWARDD_BUILD_BPF=ON \
+            -DWARDD_PACKAGE_CHANNEL="$WARDD_CHANNEL" \
+            -DWARDD_PACKAGE_BUILD_ID="$WARDD_BUILD_ID"
+
+      - name: Build and test
+        run: |
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+
+      - name: Build and inspect DEB
+        run: |
+          cpack --config build/CPackConfig.cmake -G DEB
+          dpkg-deb --info build/packages/*.deb
+          dpkg-deb --contents build/packages/*.deb
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: wardd-${{ inputs.channel }}-deb-${{ matrix.arch }}
+          path: build/packages/*.deb
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+
+  rpm:
+    name: RPM / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: rockylinux:9
+    env:
+      WARDD_CHANNEL: ${{ inputs.channel }}
+      WARDD_BUILD_ID: ${{ inputs.build_id }}
+    steps:
+      - name: Enable Rocky Linux build repositories
+        run: |
+          dnf install --assumeyes --setopt=install_weak_deps=False \
+            dnf-plugins-core
+          dnf config-manager --set-enabled crb
+
+      - name: Install Rocky Linux build dependencies
+        run: |
+          dnf install --assumeyes --setopt=install_weak_deps=False \
+            ca-certificates clang cmake gcc git libbpf-devel libcurl-devel \
+            libmaxminddb-devel libxdp-devel make openssl-devel \
+            pkgconf-pkg-config rpm-build
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_SYSCONFDIR=/etc \
+            -DWARDD_BUILD_BPF=ON \
+            -DWARDD_PACKAGE_CHANNEL="$WARDD_CHANNEL" \
+            -DWARDD_PACKAGE_BUILD_ID="$WARDD_BUILD_ID"
+
+      - name: Build and test
+        run: |
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+
+      - name: Build and inspect RPM
+        run: |
+          cpack --config build/CPackConfig.cmake -G RPM
+          rpm --query --package --info build/packages/*.rpm
+          rpm --query --package --list build/packages/*.rpm
+          rpm --query --package --requires build/packages/*.rpm
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: wardd-${{ inputs.channel }}-rpm-${{ matrix.arch }}
+          path: build/packages/*.rpm
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}

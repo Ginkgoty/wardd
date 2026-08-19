@@ -1,9 +1,10 @@
 # Installation and deployment
 
-This guide describes installation from the current source tree. Native RPM
-and DEB packages are not yet available. For production use, pin a source
-version or commit and create auditable installation artifacts in a build
-environment equivalent to the target host.
+This guide covers native packages and installation from source. Stable and
+nightly DEB/RPM artifacts are published on the
+[GitHub Releases page](https://github.com/Ginkgoty/wardd/releases). Production
+hosts should use an immutable `vX.Y.Z` release; the mutable `nightly`
+prerelease is intended for testing only.
 
 ## 1. Prerequisites and boundaries
 
@@ -22,7 +23,59 @@ environment equivalent to the target host.
 - A remote host must have cloud-console, serial-console, or equivalent
   out-of-band recovery before any XDP policy is changed to `enforce`.
 
-## 2. Install build dependencies
+## 2. Install a release package
+
+The release workflow builds these native packages:
+
+| Package | Build environment | Architectures |
+|---|---|---|
+| DEB | Ubuntu 24.04 | `amd64`, `arm64` |
+| RPM | Rocky Linux 9 | `x86_64`, `aarch64` |
+
+Download one package and `SHA256SUMS` from the same release. Do not mix a
+package from one release with a checksum file from another.
+
+### Ubuntu 24.04
+
+```sh
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./wardd_<VERSION>_<ARCH>.deb
+```
+
+### RHEL/Rocky Linux 9
+
+Enable the repositories that provide wardd's runtime libraries before package
+installation. On RHEL use the subscription-specific CodeReady Builder
+repository; on Rocky Linux use CRB.
+
+```sh
+# Rocky Linux 9 example
+sudo dnf install -y dnf-plugins-core
+sudo dnf config-manager --set-enabled crb
+
+sha256sum --ignore-missing --check SHA256SUMS
+sudo dnf install ./wardd-<VERSION>.<ARCH>.rpm
+```
+
+The package manager installs binaries, the BPF object, the example
+configuration, systemd units, and tmpfiles configuration. Installation creates
+the runtime directories and reloads systemd, but deliberately does not create
+the active configuration, enable or start the service, change a firewall, or
+attach XDP.
+
+Create the initial configuration before continuing with section 6:
+
+```sh
+sudo install -d -m 0750 /etc/wardd
+sudo install -m 0640 /etc/wardd/wardd.toml.example /etc/wardd/wardd.toml
+```
+
+Stable packages have versions such as `0.1.0-1`. Nightly package versions
+contain the UTC build timestamp and commit, sort before the corresponding
+stable version, and are replaced in the `nightly` GitHub prerelease. See the
+[release process](releasing.md) for exact semantics and provenance checks.
+
+## 3. Install source-build dependencies
 
 ### Ubuntu 24.04
 
@@ -71,7 +124,7 @@ For distribution package availability, see the
 [Ubuntu libxdp-dev package search](https://packages.ubuntu.com/libxdp-dev) and
 [RHEL 9 package and repository changes](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html-single/considerations_in_adopting_rhel_9/considerations_in_adopting_rhel_9).
 
-## 3. Build and test
+## 4. Build and test from source
 
 Set `/usr/lib` explicitly so that the current CMake installation places
 systemd units in a location recognized by both target distribution families:
@@ -99,7 +152,7 @@ used by the program and systemd unit is `/etc/wardd/wardd.toml`; setting only
 the prefix to `/usr` would otherwise place CMake's relative `etc` directory
 under `/usr/etc`.
 
-## 4. Install files
+## 5. Install source-built files
 
 ```sh
 sudo cmake --install build
@@ -124,7 +177,7 @@ Installation never overwrites the administrator-owned
 installation. Runtime data is stored under `/run/wardd`, persistent state
 under `/var/lib/wardd`, and BPF pins under `/sys/fs/bpf/wardd` by default.
 
-## 5. Configure and inspect the host
+## 6. Configure and inspect the host
 
 Edit the network interface, protected endpoints, Nginx paths, and ban ports:
 
@@ -149,7 +202,7 @@ enabled = false
 manage = false
 ```
 
-## 6. Initialize GeoIP policy
+## 7. Initialize GeoIP policy
 
 ```sh
 sudo wardctl geo update
@@ -177,7 +230,7 @@ Without `--reload`, `activate` only switches wardd-managed policy links. With
 `--reload`, it also performs a live `nginx -t` and reload inside the policy
 transaction, rolling back on failure.
 
-## 7. Integrate Nginx
+## 8. Integrate Nginx
 
 After snapshot activation, `nginx.generated_dir` contains:
 
@@ -223,7 +276,7 @@ To enable automatic banning, first complete the live Nginx test above. Then
 set `ban.auto.enabled = true`, validate the configuration again, and restart
 wardd.
 
-## 8. Start the control plane
+## 9. Start the control plane
 
 ```sh
 sudo systemctl enable --now wardd.service
@@ -238,7 +291,7 @@ sudo systemctl enable --now wardd-geo-update.timer
 systemctl list-timers wardd-geo-update.timer
 ```
 
-## 9. Stage the XDP rollout
+## 10. Stage the XDP rollout
 
 Daemon startup never attaches XDP. Attach it explicitly in observation mode:
 
@@ -270,7 +323,7 @@ Attachment uses the libxdp dispatcher and refuses to replace a legacy XDP
 program that cannot be identified safely. Detachment likewise removes only
 wardd's own program.
 
-## 10. Roll back and diagnose
+## 11. Roll back, uninstall, and diagnose
 
 ```sh
 # Stop enforcement while retaining the program and counters
@@ -294,3 +347,20 @@ automatically rewrite host or cloud firewall rules during diagnosis. If the
 Nginx event cursor or event format is corrupt, automatic-ban ingestion enters
 `degraded`; existing bans remain active, and the daemon must be restarted
 after the cause is corrected before new automatic bans resume.
+
+Before removing a package, explicitly detach wardd while `wardctl` is still
+installed:
+
+```sh
+sudo wardctl xdp detach
+sudo systemctl disable --now wardd.service wardd-geo-update.timer
+
+# Ubuntu
+sudo apt remove wardd
+
+# RHEL/Rocky Linux
+sudo dnf remove wardd
+```
+
+Package removal stops the daemon but does not implicitly detach XDP or delete
+administrator configuration and persistent policy state.
