@@ -35,6 +35,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       DEBIAN_FRONTEND: noninteractive
+      NEEDRESTART_MODE: a
+      NEEDRESTART_SUSPEND: 1
       WARDD_CHANNEL: ${{ inputs.channel }}
       WARDD_BUILD_ID: ${{ inputs.build_id }}
     steps:

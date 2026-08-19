@@ -45,6 +45,8 @@ struct wardd_nginx_event_reader {
      */
     uint64_t rejected_events;
     char last_reject_reason[128];
+    /* Set while discarding the remainder of an oversized line. */
+    bool discarding_oversized;
 };
 
 int wardd_nginx_event_parse(

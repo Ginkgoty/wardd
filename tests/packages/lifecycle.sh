@@ -59,16 +59,25 @@ check_file /usr/lib/tmpfiles.d/wardd.conf "tmpfiles fragment installed"
 # (keeping only `copyright`), so the license text is asserted against the
 # package payload rather than the installed filesystem. `copyright` is the file
 # Debian Policy actually requires on disk.
+# Capture first: piping into `grep -q` makes grep exit on the first match,
+# which hands the producer a SIGPIPE that `set -o pipefail` then reports as a
+# failure. That race is timing-dependent and passed locally while failing in CI.
+contains() {
+    case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac
+}
 case "$FAMILY" in
     deb)
-        dpkg-deb --contents "$NIGHTLY_PKG" | grep -q 'usr/share/doc/wardd/LICENSE'
+        contents=$(dpkg-deb --contents "$NIGHTLY_PKG")
+        contains "$contents" "usr/share/doc/wardd/LICENSE"
         check $? "license text is present in the package"
         check_file /usr/share/doc/wardd/copyright "copyright installed"
         ;;
     rpm)
-        rpm -qpl "$NIGHTLY_PKG" 2>/dev/null | grep -q '/usr/share/doc/wardd/LICENSE'
+        contents=$(rpm -qpl "$NIGHTLY_PKG" 2>/dev/null)
+        contains "$contents" "/usr/share/doc/wardd/LICENSE"
         check $? "license text is present in the package"
-        rpm -qp --licensefiles "$NIGHTLY_PKG" 2>/dev/null | grep -q 'LICENSE'
+        licensed=$(rpm -qp --licensefiles "$NIGHTLY_PKG" 2>/dev/null)
+        contains "$licensed" "LICENSE"
         check $? "license file is marked %license"
         check_file /usr/share/doc/wardd/copyright "copyright installed"
         ;;

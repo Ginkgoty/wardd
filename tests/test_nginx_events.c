@@ -167,6 +167,66 @@ int main(void)
         CHECK(reader.last_reject_reason[0] != '\0', "last rejection reason is recorded");
     }
 
+    /*
+     * Regression: an oversized line fills the buffer with no newline in sight.
+     * A corrupt or foreign log must be resynchronised past, not treated as a
+     * reason to stop ingesting.
+     */
+    {
+        const uint64_t rejected_before = reader.rejected_events;
+        char oversized[WARDD_NGINX_EVENT_BUFFER_LEN * 2];
+
+        memset(oversized, 'x', sizeof(oversized) - 2);
+        oversized[sizeof(oversized) - 2] = '\n';
+        oversized[sizeof(oversized) - 1] = '\0';
+        CHECK(write_text(log_path, "a", oversized) == 0, "append an oversized line");
+        CHECK(wardd_nginx_event_reader_step(
+            &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0,
+            "an oversized line is skipped rather than fatal");
+        CHECK(reader.rejected_events > rejected_before, "the oversized line is counted");
+
+        make_line(line, sizeof(line), "after-oversized", 1008);
+        CHECK(write_text(log_path, "a", line) == 0, "append a valid event after the oversized line");
+        CHECK(wardd_nginx_event_reader_step(
+            &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0, error);
+        CHECK(processed == 1 && strcmp(handled.last_request, "after-oversized") == 0,
+            "ingestion resynchronises after an oversized line");
+    }
+
+    /*
+     * Regression: logrotate renames the log while a partial line is buffered.
+     * The tail is lost, but the new file must still be picked up.
+     */
+    {
+        const uint64_t rejected_before = reader.rejected_events;
+        size_t split;
+
+        make_line(line, sizeof(line), "torn", 1009);
+        split = strlen(line) / 2;
+        CHECK(write_text(log_path, "a", "") == 0 || 1, "prepare torn-line rotation");
+        {
+            const char saved = line[split];
+            line[split] = '\0';
+            CHECK(write_text(log_path, "a", line) == 0, "append a partial event");
+            line[split] = saved;
+        }
+        CHECK(wardd_nginx_event_reader_step(
+            &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0 && processed == 0,
+            "the partial line is buffered, not processed");
+        (void)unlink(old_path);
+        CHECK(rename(log_path, old_path) == 0, "rotate while a partial line is buffered");
+        make_line(line, sizeof(line), "post-rotation", 1010);
+        CHECK(write_text(log_path, "wx", line) == 0, "create the rotated log");
+        for (int attempt = 0; attempt < 3 && processed == 0; ++attempt) {
+            CHECK(wardd_nginx_event_reader_step(
+                &reader, handle_event, &handled, 16, &processed, error, sizeof(error)) == 0,
+                "a torn line at rotation is skipped rather than fatal");
+        }
+        CHECK(processed == 1 && strcmp(handled.last_request, "post-rotation") == 0,
+            "ingestion continues into the rotated log");
+        CHECK(reader.rejected_events > rejected_before, "the torn line is counted");
+    }
+
     wardd_nginx_event_reader_close(&reader);
     CHECK(wardd_nginx_event_reader_init(&reader, delayed_log, delayed_cursor, error, sizeof(error)) == 0, error);
     errno = 0;

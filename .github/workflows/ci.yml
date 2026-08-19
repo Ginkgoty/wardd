@@ -27,6 +27,12 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     timeout-minutes: 30
+    env:
+      # Without these, installing nginx on the runner image stops at an
+      # interactive needrestart prompt and the job hangs until it times out.
+      DEBIAN_FRONTEND: noninteractive
+      NEEDRESTART_MODE: a
+      NEEDRESTART_SUSPEND: 1
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -34,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          sudo apt-get install -y -qq --no-install-recommends \
             build-essential ca-certificates clang cmake iproute2 libbpf-dev \
             libcurl4-openssl-dev libmaxminddb-dev libssl-dev libxdp-dev \
             nginx pkg-config python3

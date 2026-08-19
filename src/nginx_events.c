@@ -320,6 +320,12 @@ int wardd_nginx_event_reader_init(
     return 0;
 }
 
+static void note_rejection(struct wardd_nginx_event_reader *reader, const char *reason)
+{
+    if (reader->rejected_events < UINT64_MAX) reader->rejected_events++;
+    (void)snprintf(reader->last_reject_reason, sizeof(reader->last_reject_reason), "%s", reason);
+}
+
 static int process_buffer(
     struct wardd_nginx_event_reader *reader,
     wardd_nginx_event_handler handler,
@@ -341,6 +347,29 @@ static int process_buffer(
         bool malformed = false;
         char saved;
 
+        if (reader->discarding_oversized) {
+            /*
+             * The remainder of an oversized line is unusable. Drop bytes until
+             * the next newline and resume, rather than stopping ingestion.
+             */
+            const size_t drop = newline == NULL ? reader->buffered
+                                                : (size_t)(newline - reader->buffer) + 1U;
+            if (reader->committed_offset > UINT64_MAX - drop) {
+                set_error(error, error_size, "Nginx limit event offset would overflow");
+                return -1;
+            }
+            if (save_cursor_values(
+                    reader, reader->device, reader->inode,
+                    reader->committed_offset + drop, error, error_size
+                ) != 0) return -1;
+            memmove(reader->buffer, reader->buffer + drop, reader->buffered - drop);
+            reader->buffered -= drop;
+            reader->committed_offset += drop;
+            if (newline == NULL) return 0;
+            reader->discarding_oversized = false;
+            consumed++;
+            continue;
+        }
         if (newline == NULL) return 0;
         line_length = (size_t)(newline - reader->buffer);
         if (reader->committed_offset > UINT64_MAX - line_length - 1U) {
@@ -376,10 +405,7 @@ static int process_buffer(
         reader->committed_offset = new_offset;
         consumed++;
         if (malformed) {
-            if (reader->rejected_events < UINT64_MAX) reader->rejected_events++;
-            (void)snprintf(
-                reader->last_reject_reason, sizeof(reader->last_reject_reason), "%s", reject_reason
-            );
+            note_rejection(reader, reject_reason);
             continue;
         }
         (*processed)++;
@@ -431,8 +457,17 @@ int wardd_nginx_event_reader_step(
     while (processed < maximum_events) {
         ssize_t bytes;
         if (reader->buffered == sizeof(reader->buffer)) {
-            set_error(error, error_size, "Nginx limit event exceeds the line size limit");
-            return -1;
+            /*
+             * A full buffer with no newline means the line is longer than any
+             * event wardd emits, so the log is corrupt or foreign. Discard it
+             * and resynchronise instead of disabling automatic banning.
+             */
+            note_rejection(reader, "line exceeds the event size limit");
+            reader->discarding_oversized = true;
+            if (process_buffer(
+                    reader, handler, context, maximum_events, &processed, error, error_size
+                ) != 0) return -1;
+            continue;
         }
         bytes = read(
             reader->descriptor,
@@ -456,8 +491,15 @@ int wardd_nginx_event_reader_step(
     if (processed < maximum_events && path_inspection == 0 &&
         (path_status.st_dev != reader->device || path_status.st_ino != reader->inode)) {
         if (reader->buffered != 0) {
-            set_error(error, error_size, "rotated Nginx event log ended with a partial line");
-            return -1;
+            /*
+             * logrotate renamed the file while a partial line was buffered.
+             * That tail is unrecoverable, but losing it must not stop
+             * ingestion from the new file.
+             */
+            note_rejection(reader, "rotated event log ended with a partial line");
+            reader->committed_offset += reader->buffered;
+            reader->buffered = 0;
+            reader->discarding_oversized = false;
         }
         if (!reader->rotation_pending || reader->pending_device != path_status.st_dev ||
             reader->pending_inode != path_status.st_ino || read_any) {

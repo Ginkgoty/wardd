@@ -45,6 +45,12 @@ check() {
 expect_eq() {
     [ "$1" = "$2" ]; check $? "$3 (expected $2, got $1)"
 }
+# Capture output before matching. Piping into `grep -q` makes grep exit on the
+# first match and hands the producer a SIGPIPE, which `set -o pipefail` then
+# reports as a failure -- a timing-dependent flake.
+contains() {
+    case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac
+}
 
 WORK=$(mktemp -d /tmp/wardd-xdp-test-XXXXXX)
 LISTENER=""
@@ -179,7 +185,8 @@ NSX "$WARDCTL" xdp attach --observe --config "$WORK/wardd.toml" \
     --state-dir "$WORK/state" --object "$BPF_OBJECT" --pin-root "$PIN_ROOT" \
     --ban-state "$WORK/bans.state" >/dev/null 2>&1
 check $? "attach the XDP program in the namespace"
-NSX "$WARDCTL" xdp status --config "$WORK/wardd.toml" 2>/dev/null | grep -q "wardd=yes"
+status_line=$(NSX "$WARDCTL" xdp status --config "$WORK/wardd.toml" 2>/dev/null)
+contains "$status_line" "wardd=yes"
 check $? "status reports the wardd program as attached"
 
 start_listener
@@ -240,11 +247,11 @@ NSX "$WARDD" --config "$WORK/wardd.toml" --socket "$SOCKET" --pin-root "$PIN_ROO
     --audit-log "$WORK/audit.jsonl" --event-cursor "$WORK/cursor" >/dev/null 2>&1 &
 sleep 2
 STATUS=$(NSX "$WARDCTL" --socket "$SOCKET" status --json 2>/dev/null)
-echo "$STATUS" | grep -q '"geo_action":"observe"'
+contains "$STATUS" '"geo_action":"observe"'
 check $? "status reports the configured GeoIP action"
-echo "$STATUS" | grep -q '"geo_action_effective":"enforce"'
+contains "$STATUS" '"geo_action_effective":"enforce"'
 check $? "status reports the effective GeoIP action from the live map"
-echo "$STATUS" | grep -q '"ban_action_effective":"enforce"'
+contains "$STATUS" '"ban_action_effective":"enforce"'
 check $? "status reports the effective ban action from the live map"
 NSX "$WARDCTL" --socket "$SOCKET" shutdown >/dev/null 2>&1
 sleep 1
@@ -270,15 +277,17 @@ check $? "attach succeeds again after cleanup"
 NSX "$WARDCTL" xdp detach --config "$WORK/wardd.toml" --pin-root "$PIN_ROOT" >/dev/null 2>&1
 NSX "$WARDCTL" ban add "$CN_ADDR" --duration 300s --config "$WORK/wardd.toml" \
     --pin-root "$PIN_ROOT" --ban-state "$WORK/bans.state" >/dev/null 2>&1
-NSX "$WARDCTL" xdp attach --observe --config "$WORK/wardd.toml" \
+attach_output=$(NSX "$WARDCTL" xdp attach --observe --config "$WORK/wardd.toml" \
     --state-dir "$WORK/state" --object "$BPF_OBJECT" --pin-root "$PIN_ROOT" \
-    --ban-state "$WORK/bans.state" 2>/dev/null | grep -q "restored_bans=1"
+    --ban-state "$WORK/bans.state" 2>/dev/null)
+contains "$attach_output" "restored_bans=1"
 check $? "durable bans are restored into the live map on attach"
 
 # --- detach -----------------------------------------------------------------
 NSX "$WARDCTL" xdp detach --config "$WORK/wardd.toml" --pin-root "$PIN_ROOT" >/dev/null 2>&1
 check $? "detach the program"
-NSX "$WARDCTL" xdp status --config "$WORK/wardd.toml" 2>/dev/null | grep -q "attached=no"
+status_line=$(NSX "$WARDCTL" xdp status --config "$WORK/wardd.toml" 2>/dev/null)
+contains "$status_line" "attached=no"
 check $? "status reports the interface as clean after detach"
 [ ! -e "$PIN_ROOT" ]; check $? "detach removes the pins"
 
