@@ -22,26 +22,8 @@ prerelease is intended for testing only.
   is installed.
 - A remote host must have cloud-console, serial-console, or equivalent
   out-of-band recovery before any XDP policy is changed to `enforce`.
-
-### v0.1.0 support statement
-
-wardd v0.1.0 is validated on Ubuntu 24.04 and Rocky Linux 9, for x86_64 and
-aarch64.
-
-**The access wardd requires.** Both processes are confined by their systemd
-units — capability bounding set, system-call filter, restricted address
-families, `ProtectSystem=strict` — so what follows is the whole footprint that
-confinement leaves open. It is worth knowing before deploying, and worth
-checking against if either process is denied something at runtime:
-
-- load BPF programs and create pins under `/sys/fs/bpf`;
-- use `AF_NETLINK` sockets for libbpf/libxdp interface operations;
-- read and write `/var/lib/wardd` and write `/etc/wardd/generated`;
-- read the Nginx rate-limit event log under `/var/log/nginx`;
-- create and connect to the control socket in `/run/wardd`.
-
-`wardd-geo-update.service` needs less than this: it downloads and compiles, so
-it runs with an empty capability bounding set and writes only `/var/lib/wardd`.
+- v0.1.0 is validated on Ubuntu 24.04 and Rocky Linux 9, for x86_64 and
+  aarch64.
 
 ### What v0.1.0 was not tested against
 
