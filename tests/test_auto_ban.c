@@ -149,6 +149,29 @@ int main(void)
     CHECK(applied.calls == 3 && applied.strike == 1 && applied.duration == 10,
         "expired strike retention resets escalation");
 
+    /* Nginx stamps the event, wardd reads its own clock, so an event can arrive
+       a second or two ahead of the daemon. Such events are accepted, and must
+       therefore also survive pruning: dropping them again discards the previous
+       rejection on every new one, so the threshold is never reached and
+       automatic banning silently stops working under clock skew. */
+    for (int index = 10; index <= 12; ++index) {
+        (void)snprintf(event.request_id, sizeof(event.request_id), "req-%d", index);
+        event.event_realtime_seconds = 2002;
+        CHECK(wardd_auto_ban_process(
+                &config, path, &event, 2000, apply_ban, &applied, &decision, error, sizeof(error)) == 0,
+            error);
+    }
+    CHECK(applied.calls == 4 && decision.disposition == WARDD_AUTO_BAN_TRIGGERED,
+        "events stamped slightly ahead of the daemon clock still accumulate");
+
+    (void)snprintf(event.request_id, sizeof(event.request_id), "req-13");
+    event.event_realtime_seconds = 2010;
+    CHECK(wardd_auto_ban_process(
+            &config, path, &event, 2000, apply_ban, &applied, &decision, error, sizeof(error)) == 0,
+        error);
+    CHECK(decision.disposition == WARDD_AUTO_BAN_STALE,
+        "an event far ahead of the daemon clock is still rejected");
+
     (void)unlink(path);
     (void)unlink(lock_path);
     (void)unlink(audit_path);

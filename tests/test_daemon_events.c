@@ -176,8 +176,22 @@ int main(void)
     CHECK(now > 0 && append_events(event_log, (unsigned long long)now) == 0, "append structured Nginx events");
     for (int attempt = 0; attempt < 160 && !file_contains(ban_state, "8.8.4.4"); ++attempt) pause_short();
     CHECK(file_contains(ban_state, "8.8.4.4"), "daemon creates durable ban from third rejection");
+    /* The ban is persisted before the audit record is appended and before the
+       processed counter advances, because the audit record states an outcome
+       that is only known once the live apply has been attempted. Waiting on the
+       ban state alone therefore observes the daemon mid-decision; poll for the
+       later steps rather than assuming they have already happened. */
+    for (int attempt = 0;
+        attempt < 160 && !file_contains(audit_log, "\"outcome\":\"durable_pending\"");
+        ++attempt) pause_short();
     CHECK(file_contains(audit_log, "\"outcome\":\"durable_pending\""), "daemon appends audit event");
-    CHECK(send_command(socket_path, "STATUS TEXT", response, sizeof(response)) == 0, "read daemon status");
+    int status_result = -1;
+    for (int attempt = 0; attempt < 160; ++attempt) {
+        status_result = send_command(socket_path, "STATUS TEXT", response, sizeof(response));
+        if (status_result != 0 || strstr(response, "Nginx events processed: 3") != NULL) break;
+        pause_short();
+    }
+    CHECK(status_result == 0, "read daemon status");
     CHECK(strstr(response, "Nginx event ingestion: healthy") != NULL &&
         strstr(response, "Nginx events processed: 3") != NULL,
         "daemon reports healthy Nginx ingestion");

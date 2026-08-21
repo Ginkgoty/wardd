@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,12 @@
 #define AUTO_STATE_MAX_RECORDS 65536U
 #define AUTO_STATE_MAX_EVENTS 100000U
 #define AUTO_PATH_LEN 1024
+/* Nginx writes the event timestamp and wardd reads its own clock, so an
+   event can legitimately carry a timestamp slightly ahead of wardd. This is
+   the tolerance for that skew; it must be applied identically when an event
+   is accepted and when the retained window is pruned, or accepted events
+   would be dropped again before they can accumulate. */
+#define AUTO_FUTURE_SKEW_SECONDS 5U
 
 struct rejection_event {
     uint64_t time;
@@ -496,6 +503,12 @@ static struct auto_record *find_record(struct auto_records *records, const char 
     return NULL;
 }
 
+static bool event_within_window(uint64_t event_time, uint64_t now, uint64_t window_seconds)
+{
+    if (event_time > now) return event_time - now <= AUTO_FUTURE_SKEW_SECONDS;
+    return now - event_time < window_seconds;
+}
+
 static void prune_records(
     struct auto_records *records,
     const struct wardd_auto_ban_config *config,
@@ -508,7 +521,7 @@ static void prune_records(
         struct auto_record *record = &records->items[index];
         size_t write_event = 0;
         for (size_t event = 0; event < record->event_count; ++event) {
-            if (record->events[event].time <= now && now - record->events[event].time < config->window_seconds) {
+            if (event_within_window(record->events[event].time, now, config->window_seconds)) {
                 record->events[write_event++] = record->events[event];
             }
         }
@@ -581,10 +594,8 @@ int wardd_auto_ban_process(
         set_error(error, error_size, "automatic ban event fields are missing or unsafe");
         return -1;
     }
-    if ((event->event_realtime_seconds > now_realtime_seconds &&
-         event->event_realtime_seconds - now_realtime_seconds > 5U) ||
-        (event->event_realtime_seconds <= now_realtime_seconds &&
-         now_realtime_seconds - event->event_realtime_seconds >= config->automatic.window_seconds)) {
+    if (!event_within_window(
+            event->event_realtime_seconds, now_realtime_seconds, config->automatic.window_seconds)) {
         decision->disposition = WARDD_AUTO_BAN_STALE;
         return 0;
     }
