@@ -14,12 +14,10 @@ The current version implements GeoIP policy transactions, Nginx integration,
 the XDP GeoIP/ban data plane, manual bans, automatic bans, persistence, and
 tests. GitHub Actions builds native DEB and RPM packages for x86-64 and arm64.
 
-wardd v0.1.0 is validated on Ubuntu 24.04 and Rocky Linux 9 with SELinux
-permissive or disabled. **SELinux enforcing mode is not supported in v0.1.0**
-and no SELinux policy or AppArmor profile is shipped; see the
-[support statement](doc/installation.md#v010-support-statement) for what wardd
-needs and how to derive a local policy. The systemd units confine both
-processes independently of SELinux.
+wardd v0.1.0 is validated on Ubuntu 24.04 and Rocky Linux 9, for x86_64 and
+aarch64. See the
+[support statement](doc/installation.md#v010-support-statement) for the access
+wardd requires and for what this release was not tested against.
 
 ## Architecture
 

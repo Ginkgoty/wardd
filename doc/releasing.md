@@ -58,8 +58,8 @@ Before tagging a stable release:
    was not tested against" list in
    [installation.md](installation.md#what-v010-was-not-tested-against) honest
    for the version being shipped. `tests/packages/run.sh` and
-   `tests/xdp_netns.sh` automate most of it; a physical NIC, a distribution
-   kernel and SELinux enforcing still need a real host.
+   `tests/xdp_netns.sh` automate most of it; a physical NIC and a distribution
+   kernel still need a real host.
 3. Confirm cloud-console or equivalent recovery and verify IPv4/IPv6 CN and
    non-CN behavior without disrupting required outbound connections.
 4. Review security-sensitive changes, generated package contents, runtime

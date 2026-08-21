@@ -25,30 +25,14 @@ prerelease is intended for testing only.
 
 ### v0.1.0 support statement
 
-wardd v0.1.0 is validated on Ubuntu 24.04 and Rocky Linux 9 for x86_64 and
-aarch64, with **SELinux in permissive or disabled mode** and with no AppArmor
-profile confining wardd.
+wardd v0.1.0 is validated on Ubuntu 24.04 and Rocky Linux 9, for x86_64 and
+aarch64.
 
-**SELinux in enforcing mode is not validated and not supported in v0.1.0.**
-No SELinux policy module and no AppArmor profile are shipped. On an enforcing
-RHEL-family host, expect `wardctl` and `wardd` to be denied when they load the
-BPF object, create pins, or read the Nginx event log. Do not work around this
-by relabelling system directories or by running `setenforce 0` on a production
-host as a permanent measure.
-
-Until a policy ships, the supported options are to run wardd on a host where
-SELinux is permissive, or to author a local policy module for it. To derive
-one, run in permissive mode, exercise the full lifecycle (`geo update`,
-`xdp attach`, `set-action`, `ban add`, `detach`), then build a module from the
-collected denials:
-
-```sh
-sudo ausearch -m AVC -c wardd -c wardctl --raw | audit2allow -M wardd-local
-sudo semodule -i wardd-local.pp
-```
-
-Review the generated rules before installing them; `audit2allow` output is a
-starting point, not a vetted policy. wardd needs, at minimum, to:
+**The access wardd requires.** Both processes are confined by their systemd
+units — capability bounding set, system-call filter, restricted address
+families, `ProtectSystem=strict` — so what follows is the whole footprint that
+confinement leaves open. It is worth knowing before deploying, and worth
+checking against if either process is denied something at runtime:
 
 - load BPF programs and create pins under `/sys/fs/bpf`;
 - use `AF_NETLINK` sockets for libbpf/libxdp interface operations;
@@ -56,20 +40,14 @@ starting point, not a vetted policy. wardd needs, at minimum, to:
 - read the Nginx rate-limit event log under `/var/log/nginx`;
 - create and connect to the control socket in `/run/wardd`.
 
-The systemd units already confine both processes independently of SELinux
-(capability bounding set, system-call filter, restricted address families,
-`ProtectSystem=strict`), so a host without SELinux enforcement is not
-unconfined.
-
-A shipped, tested SELinux policy module and an AppArmor profile are planned
-for a later release.
+`wardd-geo-update.service` needs less than this: it downloads and compiles, so
+it runs with an empty capability bounding set and writes only `/var/lib/wardd`.
 
 ### What v0.1.0 was not tested against
 
 Stated plainly, because a gap matters more than the coverage around it. None of
 the following is known to be broken; none of it has been exercised:
 
-- **SELinux enforcing mode and AppArmor**, as above.
 - **Native-mode XDP on a physical NIC.** All XDP validation used generic (SKB)
   mode on a veth pair. Driver-level native XDP, and how individual NIC drivers
   behave under it, are untested. Start with `attach_mode = "generic"` if you
@@ -277,9 +255,7 @@ sudo dnf install -y \
 
 Repository names can differ between subscriptions and internal mirrors. Use
 `dnf repoquery <package>` to confirm the source before installation. Do not
-replace the system kernel or disable SELinux to build wardd. This source tree
-does not yet include a wardd SELinux policy, so production deployment requires
-policy auditing on the target system.
+replace the system kernel to build wardd.
 
 For distribution package availability, see the
 [Ubuntu libxdp-dev package search](https://packages.ubuntu.com/libxdp-dev) and
