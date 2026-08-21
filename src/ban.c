@@ -51,6 +51,124 @@ static void mask_address(unsigned char *address, unsigned int prefix, size_t byt
     if (start < bytes) memset(address + start, 0, bytes - start);
 }
 
+/*
+ * Special-purpose ranges, in the order they are reported. Sourced from the
+ * IANA IPv4/IPv6 special-purpose address registries; only the ranges an
+ * operator can plausibly type by mistake are listed, since the point is to
+ * interrupt a mistake rather than to enumerate the registry.
+ */
+struct reserved_range {
+    int family;
+    const char *network;
+    unsigned int prefix;
+    const char *label;
+};
+
+static const struct reserved_range reserved_ranges[] = {
+    {AF_INET, "0.0.0.0", 8, "0.0.0.0/8 this network"},
+    {AF_INET, "10.0.0.0", 8, "10.0.0.0/8 private (RFC 1918)"},
+    {AF_INET, "100.64.0.0", 10, "100.64.0.0/10 carrier NAT (RFC 6598)"},
+    {AF_INET, "127.0.0.0", 8, "127.0.0.0/8 loopback"},
+    {AF_INET, "169.254.0.0", 16, "169.254.0.0/16 link-local"},
+    {AF_INET, "172.16.0.0", 12, "172.16.0.0/12 private (RFC 1918)"},
+    {AF_INET, "192.0.0.0", 24, "192.0.0.0/24 IETF protocol assignments"},
+    {AF_INET, "192.0.2.0", 24, "192.0.2.0/24 documentation"},
+    {AF_INET, "192.168.0.0", 16, "192.168.0.0/16 private (RFC 1918)"},
+    {AF_INET, "198.18.0.0", 15, "198.18.0.0/15 benchmarking"},
+    {AF_INET, "198.51.100.0", 24, "198.51.100.0/24 documentation"},
+    {AF_INET, "203.0.113.0", 24, "203.0.113.0/24 documentation"},
+    {AF_INET, "224.0.0.0", 4, "224.0.0.0/4 multicast"},
+    {AF_INET, "240.0.0.0", 4, "240.0.0.0/4 reserved"},
+    {AF_INET6, "::", 128, "::/128 unspecified"},
+    {AF_INET6, "::1", 128, "::1/128 loopback"},
+    {AF_INET6, "::ffff:0:0", 96, "::ffff:0:0/96 IPv4-mapped"},
+    {AF_INET6, "100::", 64, "100::/64 discard-only"},
+    {AF_INET6, "2001:db8::", 32, "2001:db8::/32 documentation"},
+    {AF_INET6, "fc00::", 7, "fc00::/7 unique local"},
+    {AF_INET6, "fe80::", 10, "fe80::/10 link-local"},
+    {AF_INET6, "ff00::", 8, "ff00::/8 multicast"},
+};
+
+static bool prefix_matches(
+    const unsigned char *left,
+    const unsigned char *right,
+    unsigned int prefix
+)
+{
+    const size_t whole = prefix / 8U;
+    const unsigned int remaining = prefix % 8U;
+
+    if (whole != 0 && memcmp(left, right, whole) != 0) return false;
+    if (remaining == 0) return true;
+    const unsigned char mask = (unsigned char)(0xffU << (8U - remaining));
+    return (left[whole] & mask) == (right[whole] & mask);
+}
+
+size_t wardd_ban_reserved_overlap(const char *network, char *summary, size_t summary_size)
+{
+    char normalized[WARDD_BAN_NETWORK_LEN];
+    char address_text[WARDD_BAN_NETWORK_LEN];
+    unsigned char address[16] = {0};
+    char *slash;
+    char *end;
+    unsigned long prefix;
+    unsigned int maximum;
+    size_t used = 0;
+    size_t matches = 0;
+    int family;
+
+    if (summary != NULL && summary_size > 0) summary[0] = '\0';
+    if (wardd_ban_normalize(network, normalized, NULL, 0) != 0) return 0;
+    (void)snprintf(address_text, sizeof(address_text), "%s", normalized);
+    slash = strchr(address_text, '/');
+    if (slash != NULL) *slash++ = '\0';
+    if (inet_pton(AF_INET, address_text, address) == 1) {
+        family = AF_INET;
+        maximum = 32;
+    } else if (inet_pton(AF_INET6, address_text, address) == 1) {
+        family = AF_INET6;
+        maximum = 128;
+    } else {
+        return 0;
+    }
+    prefix = maximum;
+    if (slash != NULL) {
+        errno = 0;
+        prefix = strtoul(slash, &end, 10);
+        if (errno != 0 || *end != '\0' || prefix > maximum) return 0;
+    }
+
+    for (size_t index = 0; index < sizeof(reserved_ranges) / sizeof(reserved_ranges[0]); ++index) {
+        const struct reserved_range *range = &reserved_ranges[index];
+        unsigned char reserved[16] = {0};
+
+        if (range->family != family) continue;
+        if (inet_pton(range->family, range->network, reserved) != 1) continue;
+        /*
+         * Two networks overlap when they agree over the shorter of the two
+         * prefixes: either one contains the other, or they are disjoint.
+         */
+        if (!prefix_matches(
+                address, reserved, (unsigned int)prefix < range->prefix ? (unsigned int)prefix : range->prefix
+            )) {
+            continue;
+        }
+        matches++;
+        if (summary == NULL || summary_size == 0) continue;
+        const int written = snprintf(
+            summary + used, summary_size - used, "%s%s", used == 0 ? "" : ", ", range->label
+        );
+        if (written < 0 || (size_t)written >= summary_size - used) {
+            /* Keep the truncated list well formed rather than half a label. */
+            summary[used] = '\0';
+            summary_size = used + 1;
+            continue;
+        }
+        used += (size_t)written;
+    }
+    return matches;
+}
+
 int wardd_ban_normalize(
     const char *input,
     char output[WARDD_BAN_NETWORK_LEN],

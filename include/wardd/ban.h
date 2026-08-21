@@ -20,6 +20,27 @@ int wardd_ban_normalize(
     size_t error_size
 );
 
+#define WARDD_BAN_RESERVED_SUMMARY_LEN 256
+
+/*
+ * Report the special-purpose address ranges a ban network overlaps: RFC 1918
+ * private space, loopback, link-local, carrier NAT, multicast and the
+ * documentation ranges. Banning those is permitted -- an operator may run wardd
+ * where such addresses are genuinely hostile -- but it is almost always a
+ * mistake worth interrupting for, since it can lock out management access.
+ *
+ * Returns the number of ranges the network overlaps, zero for ordinary public
+ * space, and writes a bounded human-readable list into `summary`. This answers
+ * a different question from the automatic-ban peer test in auto_ban.c, which
+ * classifies one exact address rather than an operator-supplied network;
+ * tests/test_auto_ban.c asserts the two agree on the ranges that matter.
+ */
+size_t wardd_ban_reserved_overlap(
+    const char *network,
+    char *summary,
+    size_t summary_size
+);
+
 int wardd_ban_store_upsert(
     const char *path,
     const char *network,

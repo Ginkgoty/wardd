@@ -5,7 +5,7 @@
 
 int wardd_geo_compile_mmdb(
     const char *mmdb_path,
-    const char country[3],
+    const struct wardd_country_set *countries,
     const char *ipv4_output_path,
     const char *ipv6_output_path,
     const char *nginx_output_path,
@@ -15,7 +15,7 @@ int wardd_geo_compile_mmdb(
 )
 {
     (void)mmdb_path;
-    (void)country;
+    (void)countries;
     (void)ipv4_output_path;
     (void)ipv6_output_path;
     (void)nginx_output_path;

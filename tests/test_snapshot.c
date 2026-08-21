@@ -18,7 +18,7 @@ static int failures;
 static void remove_snapshot(const char *root, const char *id)
 {
     static const char *const files[] = {
-        "source.mmdb", "cn-v4.txt", "cn-v6.txt", "nginx-cn.conf",
+        "source.mmdb", "geo-v4.txt", "geo-v6.txt", "nginx-geo.conf",
         "metadata.json", "sha256", ".approved"
     };
     char directory[768];
@@ -31,6 +31,19 @@ static void remove_snapshot(const char *root, const char *id)
         (void)unlink(path);
     }
     (void)rmdir(directory);
+}
+
+static bool file_contains(const char *path, const char *needle)
+{
+    char buffer[4096];
+    FILE *file = fopen(path, "r");
+    size_t bytes;
+
+    if (file == NULL) return false;
+    bytes = fread(buffer, 1, sizeof(buffer) - 1, file);
+    buffer[bytes] = '\0';
+    (void)fclose(file);
+    return strstr(buffer, needle) != NULL;
 }
 
 int main(void)
@@ -48,6 +61,10 @@ int main(void)
     struct wardd_snapshot_status status;
     struct wardd_geo_diff diff;
 
+    const struct wardd_country_set only_cn = {.codes = {"CN"}, .count = 1};
+    const struct wardd_country_set only_jp = {.codes = {"JP"}, .count = 1};
+    const struct wardd_country_set cn_and_jp = {.codes = {"CN", "JP"}, .count = 2};
+
     CHECK(mkdtemp(parent) != NULL, "create snapshot test directory");
     (void)snprintf(root, sizeof(root), "%s/snapshots", parent);
     (void)snprintf(generated, sizeof(generated), "%s/generated", parent);
@@ -58,7 +75,7 @@ int main(void)
     CHECK(
         wardd_geo_snapshot_create(
             WARDD_TEST_MMDB_PATH,
-            "CN",
+            &only_cn,
             root,
             32U * 1024U * 1024U,
             0.20,
@@ -80,7 +97,7 @@ int main(void)
     CHECK(
         wardd_geo_snapshot_create(
             WARDD_TEST_MMDB_PATH,
-            "CN",
+            &only_cn,
             root,
             32U * 1024U * 1024U,
             0.20,
@@ -95,7 +112,7 @@ int main(void)
     CHECK(
         wardd_geo_snapshot_create(
             WARDD_TEST_MMDB_PATH,
-            "JP",
+            &only_jp,
             root,
             32U * 1024U * 1024U,
             0.01,
@@ -106,6 +123,32 @@ int main(void)
         error
     );
     CHECK(jp.pending_review, "large country-set change requires review");
+    /*
+     * A multi-country snapshot is a distinct identity from either country
+     * alone, carries the union of their prefixes, and records the set it was
+     * compiled from so the directory can be read without guessing.
+     */
+    {
+        struct wardd_snapshot_result both;
+        char metadata_path[1024];
+
+        CHECK(
+            wardd_geo_snapshot_create(
+                WARDD_TEST_MMDB_PATH, &cn_and_jp, root, 32U * 1024U * 1024U, 1.0,
+                &both, error, sizeof(error)
+            ) == 0,
+            error
+        );
+        CHECK(strstr(both.id, "-CN_JP-s2-") != NULL, "snapshot identity records the country set");
+        CHECK(strcmp(both.id, cn.id) != 0 && strcmp(both.id, jp.id) != 0,
+            "a country set is a distinct snapshot from either country alone");
+        CHECK(both.compile.ipv4_prefixes > cn.compile.ipv4_prefixes,
+            "a country set carries the union of prefixes");
+        (void)snprintf(metadata_path, sizeof(metadata_path), "%s/%s/metadata.json", root, both.id);
+        CHECK(file_contains(metadata_path, "\"countries\": [\"CN\", \"JP\"]"),
+            "metadata records the compiled country set");
+        CHECK(file_contains(metadata_path, "\"schema\": 2"), "metadata records the current schema");
+    }
     CHECK(
         wardd_geo_snapshot_activate(root, generated, jp.id, WARDD_TEST_NGINX, error, sizeof(error)) != 0,
         "pending snapshot cannot activate"

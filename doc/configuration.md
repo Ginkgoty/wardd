@@ -22,7 +22,7 @@ integer followed by `s`, `m`, `h`, or `d`; a size uses `B`, `KiB`, `MiB`, or
 version = 1
 
 [geo]
-country = "CN"
+country = ["CN"]
 provider = "mmdb"
 url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
 checksum_url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb.sha256sum"
@@ -63,6 +63,8 @@ enabled = true
 generated_dir = "/etc/wardd/generated"
 limit_event_log = "/var/log/nginx/wardd-limit.log"
 limit_zone = "wardd_default"
+binary = "nginx"
+conf_dir = "/etc/nginx/conf.d"
 
 [firewall]
 ownership = "external"
@@ -81,7 +83,7 @@ Every field in this section is required.
 
 | Field | Value or constraint | Description |
 |---|---|---|
-| `country` | Two-letter uppercase code | Region compiled into policy, for example `CN`. |
+| `country` | Code, or array of codes | Regions compiled into policy: `"CN"` or `["CN", "JP"]`. Up to 16, each two uppercase letters. |
 | `provider` | `"mmdb"` | The only provider supported by schema 1. |
 | `url` | HTTPS URL | MMDB download URL. HTTPS is mandatory. |
 | `checksum_url` | HTTPS URL | SHA-256 checksum file URL. HTTPS is mandatory. |
@@ -89,6 +91,17 @@ Every field in this section is required.
 | `max_age` | duration | Maximum data age; must be at least `update_interval`. |
 | `max_download_size` | size | Hard download limit from 1 KiB through 1 GiB. |
 | `max_change_ratio` | float | `(0, 1]`; a greater snapshot change requires manual review. |
+
+`country` accepts a single string or an array. Listing several merges their
+prefixes into one allow set: a source is permitted if it matches **any** listed
+country. The data plane stores one table and asks only whether a source is in
+it, so adding a country costs table size, not lookup work.
+
+The parser sorts and de-duplicates the list, so `["JP", "CN"]` and
+`["CN", "JP"]` are the same policy and compile to the same snapshot. The set
+appears in the snapshot identity as a `CN_JP` token. A listed country the
+database happens to carry no records for is reported as a warning rather than
+failing the compile, because a regional database may legitimately omit it.
 
 `geo update` downloads the checksum first, downloads the MMDB within the size
 limit, and verifies SHA-256. Success only creates an immutable snapshot; it
@@ -179,6 +192,26 @@ The default state file, `/var/lib/wardd/bans.state`, persists wall-clock
 expiry. wardd converts it to a monotonic TTL when synchronizing the entry into
 BPF.
 
+Manual bans are not subject to the automatic-ban address protection: an
+operator may be running wardd somewhere that private traffic is genuinely
+hostile, so wardd does not overrule that judgement. It does interrupt for it.
+A ban that overlaps RFC 1918 space, loopback, link-local, carrier NAT,
+multicast or the documentation ranges prints a warning naming the ranges
+before the ban is written:
+
+```
+$ sudo wardctl ban add 10.0.0.0/8 --permanent
+wardctl: WARNING: 10.0.0.0/8 overlaps special-purpose address space
+wardctl: WARNING:   10.0.0.0/8 private (RFC 1918)
+wardctl: WARNING: this can lock out management access and break internal traffic.
+wardctl: WARNING: proceeding anyway; undo with: wardctl ban remove 10.0.0.0/8
+added permanent ban=10.0.0.0/8 durable=yes live=pending
+```
+
+The warning comes first so that it has reached the terminal even if the ban
+does lock you out. Remember that a ban only reaches the kernel once XDP is
+attached and `ban_action` is `enforce`; until then it is durable state only.
+
 ## `[ban.auto]`
 
 The complete section can be omitted, in which case automatic banning is
@@ -214,11 +247,26 @@ omitted value defaults to `wardd_default`.
 | `generated_dir` | absolute path | Directory for wardd-owned includes and the `current` link. |
 | `limit_event_log` | absolute path | Restricted `limit_req` rejection-event log. |
 | `limit_zone` | safe name | Single trusted rate-limit zone label; must match administrator-owned Nginx configuration. |
+| `binary` | path or name | Nginx executable, resolved through `PATH` if it is a bare name. Optional; defaults to `nginx`. `--nginx` overrides it. |
+| `conf_dir` | absolute path | Directory Nginx includes from its `http` block, where `wardctl nginx enable` writes wardd's drop-in. Optional; defaults to `/etc/nginx/conf.d`. |
 
 Schema 1 supports one automatic-ban zone label. wardd does not create the
-`limit_req_zone`, set its rate or burst, or choose a location. Include the
-generated `wardd-geo.conf` in the Nginx `http` context and
-`wardd-cn-only.conf` in each `server` that requires regional restriction.
+`limit_req_zone`, set its rate or burst, or choose a location.
+
+`wardctl nginx enable` writes one file of its own, `<conf_dir>/wardd.conf`,
+which includes the generated `wardd-geo.conf` into the `http` block, and then
+runs a live `nginx -t`. If that check fails, the previous state is restored
+before the command reports the failure, so a rejected configuration is never
+left behind for the next unrelated reload to trip over. wardd never edits a
+file the administrator wrote.
+
+The per-server half cannot be placed automatically, because only the
+administrator knows which `server` should be restricted: add
+`include <generated_dir>/wardd-geo-allow.conf;` there by hand.
+`wardctl nginx status` reads `nginx -T` and reports which of the two includes
+Nginx actually resolved, exiting non-zero while either is missing or the live
+configuration cannot be read. `wardctl nginx disable` removes wardd's drop-in
+and re-checks; the per-server include stays for the administrator to remove.
 
 The automatic event log contains only the schema, socket peer, server, zone,
 `REJECTED` status, request ID, and epoch. It excludes URIs, queries, headers,

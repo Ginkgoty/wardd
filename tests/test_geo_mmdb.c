@@ -55,18 +55,22 @@ int main(void)
     char error[512] = {0};
     struct wardd_geo_compile_result result;
     struct wardd_geo_compile_result failed_result;
+    struct wardd_geo_compile_result multi_result;
+    const struct wardd_country_set only_cn = {.codes = {"CN"}, .count = 1};
+    const struct wardd_country_set cn_and_jp = {.codes = {"CN", "JP"}, .count = 2};
+    const struct wardd_country_set cn_and_absent = {.codes = {"CN", "ZZ"}, .count = 2};
     struct stat status;
 
     CHECK(wardd_geo_mmdb_available() == 1, "MMDB support must be available");
     CHECK(mkdtemp(directory) != NULL, "create temporary directory");
-    (void)snprintf(ipv4_path, sizeof(ipv4_path), "%s/cn-v4.txt", directory);
-    (void)snprintf(ipv6_path, sizeof(ipv6_path), "%s/cn-v6.txt", directory);
-    (void)snprintf(nginx_path, sizeof(nginx_path), "%s/nginx-cn.conf", directory);
+    (void)snprintf(ipv4_path, sizeof(ipv4_path), "%s/geo-v4.txt", directory);
+    (void)snprintf(ipv6_path, sizeof(ipv6_path), "%s/geo-v6.txt", directory);
+    (void)snprintf(nginx_path, sizeof(nginx_path), "%s/nginx-geo.conf", directory);
 
     CHECK(
         wardd_geo_compile_mmdb(
             WARDD_TEST_MMDB_PATH,
-            "CN",
+            &only_cn,
             ipv4_path,
             ipv6_path,
             nginx_path,
@@ -91,7 +95,7 @@ int main(void)
     CHECK(
         wardd_geo_compile_mmdb(
             WARDD_TEST_MMDB_PATH,
-            "CN",
+            &only_cn,
             ipv4_path,
             ipv6_path,
             nginx_path,
@@ -103,6 +107,59 @@ int main(void)
     );
     CHECK(stat(nginx_path, &status) == 0 && status.st_size > 0, "failed compile preserves existing output");
 
+    (void)unlink(ipv4_path);
+    (void)unlink(ipv6_path);
+    (void)unlink(nginx_path);
+
+    /*
+     * Two countries merge into one allow set. The data plane only ever asks
+     * whether a source is in the set, so the result must be the union of both
+     * countries' prefixes and nothing else.
+     */
+    CHECK(
+        wardd_geo_compile_mmdb(
+            WARDD_TEST_MMDB_PATH,
+            &cn_and_jp,
+            ipv4_path,
+            ipv6_path,
+            nginx_path,
+            &multi_result,
+            error,
+            sizeof(error)
+        ) == 0,
+        error
+    );
+    CHECK(multi_result.ipv4_prefixes > result.ipv4_prefixes, "adding a country adds IPv4 prefixes");
+    CHECK(multi_result.ipv6_prefixes > result.ipv6_prefixes, "adding a country adds IPv6 prefixes");
+    CHECK(multi_result.matched_countries == 0x3U, "both requested countries were found");
+    CHECK(file_contains(ipv4_path, "203.0.113.0/24") != 0, "the second country's IPv4 prefix is present");
+    CHECK(file_contains(ipv6_path, "2001:db8:2::/48") != 0, "the second country's IPv6 prefix is present");
+    CHECK(file_contains(ipv4_path, "192.0.2.0/25") != 0, "the first country's prefixes are retained");
+    (void)unlink(ipv4_path);
+    (void)unlink(ipv6_path);
+    (void)unlink(nginx_path);
+
+    /*
+     * A country the database never mentions is reported through
+     * matched_countries rather than failing the compile: a regional database
+     * legitimately may not carry it, but the operator must be able to tell.
+     */
+    CHECK(
+        wardd_geo_compile_mmdb(
+            WARDD_TEST_MMDB_PATH,
+            &cn_and_absent,
+            ipv4_path,
+            ipv6_path,
+            nginx_path,
+            &multi_result,
+            error,
+            sizeof(error)
+        ) == 0,
+        error
+    );
+    CHECK(multi_result.matched_countries == 0x1U, "an absent country is reported, not fatal");
+    CHECK(multi_result.ipv4_prefixes == result.ipv4_prefixes,
+        "an absent country contributes no prefixes");
     (void)unlink(ipv4_path);
     (void)unlink(ipv6_path);
     (void)unlink(nginx_path);

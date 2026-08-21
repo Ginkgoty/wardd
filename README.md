@@ -47,6 +47,9 @@ processes independently of SELinux.
  service ---> service.external.com   (outbound traffic bypasses ingress XDP policy)
 ```
 
+`geo.country` accepts one code or several -- `country = ["CN", "JP"]` -- whose
+prefixes merge into a single allow set.
+
 The data plane evaluates policies only on configured TCP destination ports.
 GeoIP policy applies only to `xdp.geo_endpoint`; ban policy applies only to
 `ban.protected_tcp_ports`. XDP attachment always begins in `observe` mode, and
@@ -115,10 +118,15 @@ sudo wardctl geo status
 sudo wardctl geo activate <SNAPSHOT_ID>
 ```
 
-Declare the rate-limit zone and include the wardd-generated HTTP-level file in
-the Nginx `http` block. Include the server-level file in each `server` that
-must be restricted to the configured region. The administrator always owns
-the rate, `burst`, and location selection.
+`wardctl nginx enable` installs the `http`-block include as a drop-in wardd
+owns, then verifies the live configuration still loads and rolls back if it
+does not. The per-`server` include stays manual: only the administrator knows
+which `server` to restrict. The administrator also always owns the rate-limit
+zone, its rate, `burst`, and location selection.
+
+```sh
+sudo wardctl nginx enable
+```
 
 ```nginx
 http {
@@ -126,7 +134,7 @@ http {
     include /etc/wardd/generated/wardd-geo.conf;
 
     server {
-        include /etc/wardd/generated/wardd-cn-only.conf;
+        include /etc/wardd/generated/wardd-geo-allow.conf;
 
         location /api/ {
             limit_req zone=wardd_default burst=20;
@@ -138,6 +146,7 @@ http {
 ```sh
 sudo nginx -t
 sudo systemctl reload nginx
+sudo wardctl nginx status     # confirms what Nginx actually resolved
 sudo systemctl enable --now wardd.service
 sudo wardctl status
 ```

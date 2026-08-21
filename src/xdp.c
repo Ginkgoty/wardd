@@ -396,8 +396,8 @@ static int build_country_maps(
         return -1;
     }
     if (path_join(directory, sizeof(directory), snapshot_root, snapshot_status.current) != 0 ||
-        path_join(ipv4_path, sizeof(ipv4_path), directory, "cn-v4.txt") != 0 ||
-        path_join(ipv6_path, sizeof(ipv6_path), directory, "cn-v6.txt") != 0 ||
+        path_join(ipv4_path, sizeof(ipv4_path), directory, "geo-v4.txt") != 0 ||
+        path_join(ipv6_path, sizeof(ipv6_path), directory, "geo-v6.txt") != 0 ||
         path_join(approval_path, sizeof(approval_path), directory, ".approved") != 0 ||
         lstat(approval_path, &approval_status) != 0 || !S_ISREG(approval_status.st_mode)) {
         set_error(error, error_size, "active GeoIP snapshot is incomplete or unapproved");

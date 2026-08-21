@@ -14,7 +14,8 @@
 
 struct compiler {
     MMDB_s database;
-    char country[3];
+    const struct wardd_country_set *countries;
+    uint32_t matched_countries;
     FILE *ipv4_output;
     FILE *ipv6_output;
     FILE *nginx_output;
@@ -72,8 +73,13 @@ static int entry_matches_country(
         set_error(compiler, "country.iso_code is not a UTF-8 string");
         return -1;
     }
-    *matches = data.data_size == 2 &&
-        memcmp(data.utf8_string, compiler->country, 2) == 0;
+    if (data.data_size != 2) return 0;
+    for (size_t index = 0; index < compiler->countries->count; ++index) {
+        if (memcmp(data.utf8_string, compiler->countries->codes[index], 2) != 0) continue;
+        compiler->matched_countries |= (uint32_t)1U << index;
+        *matches = true;
+        return 0;
+    }
     return 0;
 }
 
@@ -216,7 +222,7 @@ static void close_output(FILE **output)
 
 int wardd_geo_compile_mmdb(
     const char *mmdb_path,
-    const char country[3],
+    const struct wardd_country_set *countries,
     const char *ipv4_output_path,
     const char *ipv6_output_path,
     const char *nginx_output_path,
@@ -237,14 +243,19 @@ int wardd_geo_compile_mmdb(
     if (result != NULL) {
         memset(result, 0, sizeof(*result));
     }
-    if (mmdb_path == NULL || country == NULL || strlen(country) != 2 ||
+    if (mmdb_path == NULL || countries == NULL || countries->count == 0 ||
+        countries->count > WARDD_MAX_COUNTRIES ||
         ipv4_output_path == NULL || ipv6_output_path == NULL || nginx_output_path == NULL) {
-        set_error(&compiler, "MMDB input, two-letter country, and output paths are required");
+        set_error(&compiler, "MMDB input, at least one country, and output paths are required");
         return -1;
     }
-    compiler.country[0] = country[0];
-    compiler.country[1] = country[1];
-    compiler.country[2] = '\0';
+    for (size_t index = 0; index < countries->count; ++index) {
+        if (strlen(countries->codes[index]) != 2) {
+            set_error(&compiler, "every compiled country must be a two-letter code");
+            return -1;
+        }
+    }
+    compiler.countries = countries;
 
     status = MMDB_open(mmdb_path, MMDB_MODE_MMAP, &compiler.database);
     if (status != MMDB_SUCCESS) {
@@ -316,7 +327,7 @@ int wardd_geo_compile_mmdb(
         compiler.visited_nodes += ipv4_visited;
     }
     if (compiler.ipv4_prefixes == 0 || compiler.ipv6_prefixes == 0) {
-        set_error(&compiler, "compiled country must contain both IPv4 and IPv6 prefixes");
+        set_error(&compiler, "compiled countries must contain both IPv4 and IPv6 prefixes");
         goto done;
     }
     if (flush_output(&compiler, compiler.ipv4_output, "IPv4") != 0 ||
@@ -330,6 +341,7 @@ int wardd_geo_compile_mmdb(
         result->visited_nodes = compiler.visited_nodes;
         result->ipv4_prefixes = compiler.ipv4_prefixes;
         result->ipv6_prefixes = compiler.ipv6_prefixes;
+        result->matched_countries = compiler.matched_countries;
         if (compiler.database.metadata.database_type != NULL) {
             (void)snprintf(
                 result->database_type,

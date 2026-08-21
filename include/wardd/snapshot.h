@@ -36,7 +36,7 @@ struct wardd_snapshot_status {
 
 int wardd_geo_snapshot_create(
     const char *mmdb_path,
-    const char country[3],
+    const struct wardd_country_set *countries,
     const char *snapshot_root,
     uint64_t max_source_bytes,
     double max_change_ratio,

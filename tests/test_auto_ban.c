@@ -1,4 +1,5 @@
 #include "wardd/auto_ban.h"
+#include "wardd/ban.h"
 #include "wardd/audit.h"
 
 #include <stdio.h>
@@ -171,6 +172,44 @@ int main(void)
         error);
     CHECK(decision.disposition == WARDD_AUTO_BAN_STALE,
         "an event far ahead of the daemon clock is still rejected");
+
+    /*
+     * The manual-ban warning and the automatic-ban peer test answer different
+     * questions and are implemented separately. They must not disagree about
+     * whether an address is ordinary public space, or an operator would be
+     * warned about a network wardd is happy to ban itself, or worse the other
+     * way round.
+     */
+    static const struct {
+        const char *peer;
+        bool public_space;
+    } classification_cases[] = {
+        {"10.1.2.3", false},
+        {"172.20.3.4", false},
+        {"192.168.1.5", false},
+        {"127.0.0.1", false},
+        {"169.254.1.1", false},
+        {"100.100.1.1", false},
+        {"fe80::1", false},
+        {"fc00::1", false},
+        {"8.8.8.8", true},
+        {"1.1.1.1", true},
+        {"2001:4860:4860::8888", true},
+    };
+    for (size_t index = 0; index < sizeof(classification_cases) / sizeof(classification_cases[0]); ++index) {
+        char summary[WARDD_BAN_RESERVED_SUMMARY_LEN];
+        const bool warned =
+            wardd_ban_reserved_overlap(classification_cases[index].peer, summary, sizeof(summary)) != 0;
+        (void)snprintf(event.peer, sizeof(event.peer), "%s", classification_cases[index].peer);
+        (void)snprintf(event.request_id, sizeof(event.request_id), "class-%zu", index);
+        event.event_realtime_seconds = 3000;
+        CHECK(wardd_auto_ban_process(
+                &config, path, &event, 3000, apply_ban, &applied, &decision, error, sizeof(error)) == 0,
+            error);
+        const bool auto_rejected = decision.disposition == WARDD_AUTO_BAN_NON_PUBLIC;
+        CHECK(warned == auto_rejected && warned != classification_cases[index].public_space,
+            classification_cases[index].peer);
+    }
 
     (void)unlink(path);
     (void)unlink(lock_path);

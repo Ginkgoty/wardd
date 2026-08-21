@@ -202,6 +202,16 @@ static enum effective_action_state read_effective_actions(
     return EFFECTIVE_KNOWN;
 }
 
+static const char *country_list_text(const struct wardd_country_set *countries)
+{
+    static char text[WARDD_COUNTRY_TOKEN_LEN];
+
+    if (wardd_country_set_token(countries, text, sizeof(text)) != 0) {
+        (void)snprintf(text, sizeof(text), "invalid");
+    }
+    return text;
+}
+
 static const char *effective_action_name(
     enum effective_action_state state,
     enum wardd_action action
@@ -241,7 +251,7 @@ static void respond_status_text(
         "Daemon: running\n"
         "Version: %s\n"
         "Config schema: %u\n"
-        "Country: %s\n"
+        "Countries: %s\n"
         "XDP configured: %s\n"
         "XDP attached: %s\n"
         "XDP active mode: %s\n"
@@ -258,7 +268,7 @@ static void respond_status_text(
         "Runtime phase: GeoIP control plane and explicit libxdp management\n",
         WARDD_VERSION,
         config->version,
-        config->geo.country,
+        country_list_text(&config->geo.countries),
         config->xdp.enabled ? "yes" : "no",
         have_xdp_status && xdp_status.wardd_attached ? "yes" : "no",
         have_xdp_status && xdp_status.attached ? xdp_status.mode : "none",
@@ -304,7 +314,7 @@ static void respond_status_json(
     (void)dprintf(
         client_fd,
         "{\"daemon\":\"running\",\"version\":\"%s\","
-        "\"config_schema\":%u,\"country\":\"%s\","
+        "\"config_schema\":%u,\"countries\":\"%s\","
         "\"xdp_configured\":%s,\"xdp_attached\":%s,"
         "\"xdp_mode\":\"%s\","
         "\"attach_preference\":\"%s\",\"geo_action\":\"%s\","
@@ -319,7 +329,7 @@ static void respond_status_json(
         "\"firewall_managed\":false,\"runtime_phase\":\"geo_xdp_control_plane\"}\n",
         WARDD_VERSION,
         config->version,
-        config->geo.country,
+        country_list_text(&config->geo.countries),
         config->xdp.enabled ? "true" : "false",
         have_xdp_status && xdp_status.wardd_attached ? "true" : "false",
         have_xdp_status && xdp_status.attached ? xdp_status.mode : "none",

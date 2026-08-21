@@ -139,7 +139,7 @@ check $? "activate the snapshot"
 
 # A source address inside the compiled country set, derived from the snapshot
 # itself so the test does not hard-code any prefix.
-CN_PREFIX=$(head -1 "$WORK/state/current/cn-v4.txt" 2>/dev/null)
+CN_PREFIX=$(head -1 "$WORK/state/current/geo-v4.txt" 2>/dev/null)
 [ -n "$CN_PREFIX" ] || skip "compiled snapshot contains no IPv4 prefixes"
 CN_ADDR=$(python3 -c "
 import ipaddress

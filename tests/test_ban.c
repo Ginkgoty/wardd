@@ -96,6 +96,53 @@ int main(void)
     CHECK(wardd_ban_normalize("0.0.0.0/0", normalized, error, sizeof(error)) != 0, "reject IPv4 /0");
     CHECK(wardd_ban_normalize("::/0", normalized, error, sizeof(error)) != 0, "reject IPv6 /0");
 
+    static const struct {
+        const char *network;
+        size_t expected;
+        const char *fragment;
+    } reserved_cases[] = {
+        {"10.0.0.0/8", 1, "RFC 1918"},
+        {"10.1.2.3", 1, "10.0.0.0/8"},
+        {"172.16.0.0/12", 1, "RFC 1918"},
+        {"172.20.3.0/24", 1, "172.16.0.0/12"},
+        {"192.168.1.5", 1, "192.168.0.0/16"},
+        {"127.0.0.1", 1, "loopback"},
+        {"169.254.1.1", 1, "link-local"},
+        {"100.64.0.0/10", 1, "carrier NAT"},
+        /* A short prefix straddles several ranges; all of them are reported. */
+        {"0.0.0.0/4", 2, "10.0.0.0/8"},
+        {"fc00::/7", 1, "unique local"},
+        {"fe80::1", 1, "link-local"},
+        {"::1", 1, "loopback"},
+        /* Ordinary public space must stay silent, or the warning becomes noise. */
+        {"8.8.8.8", 0, NULL},
+        {"1.1.1.0/24", 0, NULL},
+        {"2001:4860:4860::8888", 0, NULL},
+        {"2400:cb00::/32", 0, NULL},
+    };
+    for (size_t index = 0; index < sizeof(reserved_cases) / sizeof(reserved_cases[0]); ++index) {
+        char summary[WARDD_BAN_RESERVED_SUMMARY_LEN];
+        const size_t matched =
+            wardd_ban_reserved_overlap(reserved_cases[index].network, summary, sizeof(summary));
+        CHECK(matched == reserved_cases[index].expected, reserved_cases[index].network);
+        if (reserved_cases[index].fragment != NULL) {
+            CHECK(strstr(summary, reserved_cases[index].fragment) != NULL, reserved_cases[index].network);
+        } else {
+            CHECK(summary[0] == '\0', reserved_cases[index].network);
+        }
+    }
+    /*
+     * A buffer that holds the first label but not the second must yield that
+     * label whole. Reporting half a range name would be worse than reporting
+     * one fewer.
+     */
+    char narrow[sizeof("0.0.0.0/8 this network")];
+    CHECK(wardd_ban_reserved_overlap("0.0.0.0/4", narrow, sizeof(narrow)) == 2 &&
+        strcmp(narrow, "0.0.0.0/8 this network") == 0,
+        "reserved summary truncates on a whole label");
+    CHECK(wardd_ban_reserved_overlap("not-an-address", NULL, 0) == 0,
+        "invalid input reports no reserved overlap");
+
     (void)unlink(path);
     (void)unlink(lock_path);
     (void)snprintf(path, sizeof(path), "%s/state", directory);

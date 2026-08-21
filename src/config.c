@@ -20,6 +20,11 @@ enum section {
     SECTION_FIREWALL,
 };
 
+/* enabled, generated_dir, limit_event_log; limit_zone, binary and conf_dir
+   all have defaults and may be omitted. */
+#define NGINX_REQUIRED_FIELDS 0x7ULL
+#define NGINX_OPTIONAL_FIELDS 0x38ULL
+
 struct parse_state {
     enum section section;
     unsigned long long root_fields;
@@ -393,6 +398,127 @@ static int parse_ports(
     return 0;
 }
 
+static bool valid_country_code(const char *text)
+{
+    return strlen(text) == 2 &&
+        isupper((unsigned char)text[0]) && isupper((unsigned char)text[1]);
+}
+
+/*
+ * geo.country accepts either one code or an array of them. The single-string
+ * form is what every configuration written before multi-country support used,
+ * and it keeps working unchanged as a one-element list.
+ *
+ * The result is sorted, so ["JP", "CN"] and ["CN", "JP"] describe the same
+ * policy and compile to the same snapshot identity.
+ */
+static int parse_country_value(
+    const char *value,
+    struct wardd_country_set *countries,
+    char *error,
+    size_t error_size,
+    size_t line
+)
+{
+    const char *cursor = value;
+    size_t count = 0;
+
+    while (isspace((unsigned char)*cursor)) cursor++;
+    if (*cursor != '[') {
+        if (parse_string(value, countries->codes[0], WARDD_COUNTRY_LEN, error, error_size, line) != 0) return -1;
+        if (!valid_country_code(countries->codes[0])) {
+            set_error(error, error_size, line, "geo.country must be a two-letter uppercase code");
+            return -1;
+        }
+        countries->count = 1;
+        return 0;
+    }
+    cursor++;
+    for (;;) {
+        const char *start;
+        size_t length;
+
+        while (isspace((unsigned char)*cursor)) cursor++;
+        if (*cursor == ']') {
+            cursor++;
+            break;
+        }
+        if (*cursor++ != '"' || count == WARDD_MAX_COUNTRIES) {
+            set_error(error, error_size, line, "invalid or excessive geo.country entries");
+            return -1;
+        }
+        start = cursor;
+        while (*cursor != '\0' && *cursor != '"') {
+            if (*cursor == '\\' || (unsigned char)*cursor < 0x20) {
+                set_error(error, error_size, line, "geo.country entries cannot contain escapes or controls");
+                return -1;
+            }
+            cursor++;
+        }
+        if (*cursor != '"') {
+            set_error(error, error_size, line, "unterminated geo.country entry");
+            return -1;
+        }
+        length = (size_t)(cursor - start);
+        if (length != 2) {
+            set_error(error, error_size, line, "geo.country entries must be two-letter uppercase codes");
+            return -1;
+        }
+        memcpy(countries->codes[count], start, length);
+        countries->codes[count][length] = '\0';
+        if (!valid_country_code(countries->codes[count])) {
+            set_error(error, error_size, line, "geo.country entries must be two-letter uppercase codes");
+            return -1;
+        }
+        for (size_t index = 0; index < count; ++index) {
+            if (strcmp(countries->codes[index], countries->codes[count]) == 0) {
+                set_error(error, error_size, line, "duplicate geo.country entry");
+                return -1;
+            }
+        }
+        count++;
+        cursor++;
+        while (isspace((unsigned char)*cursor)) cursor++;
+        if (*cursor == ',') {
+            cursor++;
+            continue;
+        }
+        if (*cursor == ']') {
+            cursor++;
+            break;
+        }
+        set_error(error, error_size, line, "expected ',' or ']' in geo.country array");
+        return -1;
+    }
+    while (isspace((unsigned char)*cursor)) cursor++;
+    if (*cursor != '\0') {
+        set_error(error, error_size, line, "unexpected characters after geo.country array");
+        return -1;
+    }
+    if (count == 0) {
+        set_error(error, error_size, line, "geo.country must list at least one country");
+        return -1;
+    }
+    /*
+     * Insertion sort over fixed-size elements. memcpy rather than snprintf:
+     * source and destination live in the same array, and snprintf may not
+     * overlap its arguments.
+     */
+    for (size_t index = 1; index < count; ++index) {
+        char pending[WARDD_COUNTRY_LEN];
+        size_t position = index;
+
+        memcpy(pending, countries->codes[index], WARDD_COUNTRY_LEN);
+        while (position > 0 && strcmp(countries->codes[position - 1], pending) > 0) {
+            memcpy(countries->codes[position], countries->codes[position - 1], WARDD_COUNTRY_LEN);
+            position--;
+        }
+        memcpy(countries->codes[position], pending, WARDD_COUNTRY_LEN);
+    }
+    countries->count = count;
+    return 0;
+}
+
 static int parse_address_array(
     const char *value,
     char addresses[WARDD_MAX_BAN_EXEMPT][WARDD_ADDRESS_LEN],
@@ -618,7 +744,7 @@ static int parse_geo_key(
     if (strcmp(key, "country") == 0) {
         bit = 0;
         if (mark_field(&state->geo_fields, bit, key, error, error_size, line) != 0) return -1;
-        return parse_string(value, config->geo.country, sizeof(config->geo.country), error, error_size, line);
+        return parse_country_value(value, &config->geo.countries, error, error_size, line);
     }
     if (strcmp(key, "provider") == 0) {
         bit = 1;
@@ -850,6 +976,14 @@ static int parse_nginx_key(
         if (mark_field(&state->nginx_fields, 3, key, error, error_size, line) != 0) return -1;
         return parse_string(value, config->nginx.limit_zone, sizeof(config->nginx.limit_zone), error, error_size, line);
     }
+    if (strcmp(key, "binary") == 0) {
+        if (mark_field(&state->nginx_fields, 4, key, error, error_size, line) != 0) return -1;
+        return parse_string(value, config->nginx.binary, sizeof(config->nginx.binary), error, error_size, line);
+    }
+    if (strcmp(key, "conf_dir") == 0) {
+        if (mark_field(&state->nginx_fields, 5, key, error, error_size, line) != 0) return -1;
+        return parse_string(value, config->nginx.conf_dir, sizeof(config->nginx.conf_dir), error, error_size, line);
+    }
     set_error(error, error_size, line, "unknown nginx key '%s'", key);
     return -1;
 }
@@ -986,7 +1120,8 @@ static int validate_config(
         set_error(error, error_size, 0, "the ban.auto section is incomplete");
         return -1;
     }
-    if (state->nginx_fields != 0x7ULL && state->nginx_fields != 0xfULL) {
+    if ((state->nginx_fields & NGINX_REQUIRED_FIELDS) != NGINX_REQUIRED_FIELDS ||
+        (state->nginx_fields & ~(NGINX_REQUIRED_FIELDS | NGINX_OPTIONAL_FIELDS)) != 0) {
         set_error(error, error_size, 0, "the nginx section is incomplete");
         return -1;
     }
@@ -994,11 +1129,15 @@ static int validate_config(
         set_error(error, error_size, 0, "the firewall section is incomplete");
         return -1;
     }
-    if (strlen(config->geo.country) != 2 ||
-        !isupper((unsigned char)config->geo.country[0]) ||
-        !isupper((unsigned char)config->geo.country[1])) {
-        set_error(error, error_size, 0, "geo.country must be a two-letter uppercase code");
+    if (config->geo.countries.count == 0 || config->geo.countries.count > WARDD_MAX_COUNTRIES) {
+        set_error(error, error_size, 0, "geo.country must list between 1 and %d countries", WARDD_MAX_COUNTRIES);
         return -1;
+    }
+    for (size_t index = 0; index < config->geo.countries.count; ++index) {
+        if (!valid_country_code(config->geo.countries.codes[index])) {
+            set_error(error, error_size, 0, "geo.country entries must be two-letter uppercase codes");
+            return -1;
+        }
     }
     if (strcmp(config->geo.provider, "mmdb") != 0) {
         set_error(error, error_size, 0, "only the mmdb geo provider is supported");
@@ -1093,6 +1232,14 @@ static int validate_config(
         set_error(error, error_size, 0, "enabled nginx integration requires absolute paths");
         return -1;
     }
+    if (config->nginx.enabled && config->nginx.conf_dir[0] != '/') {
+        set_error(error, error_size, 0, "nginx.conf_dir must be an absolute path");
+        return -1;
+    }
+    if (config->nginx.enabled && config->nginx.binary[0] == '\0') {
+        set_error(error, error_size, 0, "nginx.binary must name or locate the Nginx executable");
+        return -1;
+    }
     if (config->firewall.manage) {
         set_error(error, error_size, 0, "firewall.manage must remain false in configuration version 1");
         return -1;
@@ -1108,6 +1255,8 @@ void wardd_config_init(struct wardd_config *config)
     config->xdp.ban_action = WARDD_ACTION_OBSERVE;
     config->firewall.ownership = WARDD_FIREWALL_NONE;
     (void)snprintf(config->nginx.limit_zone, sizeof(config->nginx.limit_zone), "wardd_default");
+    (void)snprintf(config->nginx.binary, sizeof(config->nginx.binary), "nginx");
+    (void)snprintf(config->nginx.conf_dir, sizeof(config->nginx.conf_dir), "/etc/nginx/conf.d");
 }
 
 int wardd_config_load(
@@ -1166,6 +1315,30 @@ done:
     free(line_buffer);
     (void)fclose(file);
     return result;
+}
+
+int wardd_country_set_token(
+    const struct wardd_country_set *countries,
+    char *output,
+    size_t output_size
+)
+{
+    size_t used = 0;
+
+    if (countries == NULL || output == NULL || output_size == 0) return -1;
+    output[0] = '\0';
+    if (countries->count == 0 || countries->count > WARDD_MAX_COUNTRIES) return -1;
+    for (size_t index = 0; index < countries->count; ++index) {
+        const int written = snprintf(
+            output + used, output_size - used, "%s%s", index == 0 ? "" : "_", countries->codes[index]
+        );
+        if (written < 0 || (size_t)written >= output_size - used) {
+            output[0] = '\0';
+            return -1;
+        }
+        used += (size_t)written;
+    }
+    return 0;
 }
 
 const char *wardd_action_name(enum wardd_action action)

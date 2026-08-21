@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define WARDD_COUNTRY_LEN 3
+#define WARDD_MAX_COUNTRIES 16
 #define WARDD_NAME_LEN 32
 #define WARDD_INTERFACE_LEN 64
 #define WARDD_ADDRESS_LEN 64
@@ -33,8 +34,18 @@ enum wardd_firewall_ownership {
     WARDD_FIREWALL_NONE,
 };
 
+/*
+ * One or more ISO 3166-1 alpha-2 codes, kept sorted and de-duplicated by the
+ * parser so that a snapshot identity does not depend on the order the
+ * administrator happened to write them in.
+ */
+struct wardd_country_set {
+    char codes[WARDD_MAX_COUNTRIES][WARDD_COUNTRY_LEN];
+    size_t count;
+};
+
 struct wardd_geo_config {
-    char country[WARDD_COUNTRY_LEN];
+    struct wardd_country_set countries;
     char provider[WARDD_NAME_LEN];
     char url[WARDD_URL_LEN];
     char checksum_url[WARDD_URL_LEN];
@@ -85,6 +96,10 @@ struct wardd_nginx_config {
     char generated_dir[WARDD_PATH_LEN];
     char limit_event_log[WARDD_PATH_LEN];
     char limit_zone[WARDD_NAME_LEN];
+    /* Where to find Nginx, and the drop-in directory it includes from its http
+       block. Both optional; the defaults suit Debian and RHEL packaging. */
+    char binary[WARDD_PATH_LEN];
+    char conf_dir[WARDD_PATH_LEN];
 };
 
 struct wardd_firewall_config {
@@ -108,6 +123,16 @@ int wardd_config_load(
     struct wardd_config *config,
     char *error,
     size_t error_size
+);
+
+#define WARDD_COUNTRY_TOKEN_LEN (WARDD_MAX_COUNTRIES * WARDD_COUNTRY_LEN)
+
+/* Render the country set as the canonical "CN_JP" token used in snapshot
+   identities and status output. Returns -1 if the buffer is too small. */
+int wardd_country_set_token(
+    const struct wardd_country_set *countries,
+    char *output,
+    size_t output_size
 );
 
 const char *wardd_action_name(enum wardd_action action);

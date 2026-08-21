@@ -18,6 +18,12 @@
 #include <time.h>
 #include <unistd.h>
 
+/*
+ * Bumped from 1 when geo.country became a list. The schema is part of the
+ * snapshot identity so that directories written by an older wardd, which hold
+ * differently named files, can never collide with new ones.
+ */
+#define SNAPSHOT_METADATA_SCHEMA 2u
 #define SNAPSHOT_PATH_LEN 2048
 #define PREFIX_LINE_LIMIT 2000000U
 
@@ -129,7 +135,7 @@ static int validate_snapshot(
 )
 {
     static const char *const files[] = {
-        "source.mmdb", "cn-v4.txt", "cn-v6.txt", "nginx-cn.conf", "metadata.json", "sha256"
+        "source.mmdb", "geo-v4.txt", "geo-v6.txt", "nginx-geo.conf", "metadata.json", "sha256"
     };
     struct stat status;
 
@@ -218,7 +224,7 @@ done:
 static void cleanup_staging(const char *directory)
 {
     static const char *const files[] = {
-        "source.mmdb", "cn-v4.txt", "cn-v6.txt", "nginx-cn.conf", "metadata.json", "sha256", ".approved"
+        "source.mmdb", "geo-v4.txt", "geo-v6.txt", "nginx-geo.conf", "metadata.json", "sha256", ".approved"
     };
 
     if (directory == NULL || strstr(directory, "/.staging-") == NULL) return;
@@ -398,7 +404,7 @@ int wardd_geo_snapshot_diff(
         return -1;
     }
     for (size_t family = 0; family < 2; ++family) {
-        const char *filename = family == 0 ? "cn-v4.txt" : "cn-v6.txt";
+        const char *filename = family == 0 ? "geo-v4.txt" : "geo-v6.txt";
         char old_path[SNAPSHOT_PATH_LEN];
         char new_path[SNAPSHOT_PATH_LEN];
         if (path_join(old_path, sizeof(old_path), old_directory, filename) != 0 ||
@@ -531,7 +537,7 @@ static void safe_database_type(const char *input, char *output, size_t output_si
 
 int wardd_geo_snapshot_create(
     const char *mmdb_path,
-    const char country[3],
+    const struct wardd_country_set *countries,
     const char *snapshot_root,
     uint64_t max_source_bytes,
     double max_change_ratio,
@@ -548,6 +554,8 @@ int wardd_geo_snapshot_create(
     char ipv6_path[SNAPSHOT_PATH_LEN];
     char nginx_path[SNAPSHOT_PATH_LEN];
     char metadata_path[SNAPSHOT_PATH_LEN];
+    char country_token[WARDD_COUNTRY_TOKEN_LEN];
+    char country_json[WARDD_MAX_COUNTRIES * (WARDD_COUNTRY_LEN + 3)];
     char checksum_path[SNAPSHOT_PATH_LEN];
     char current[WARDD_SNAPSHOT_ID_LEN];
     char metadata[2048];
@@ -560,8 +568,8 @@ int wardd_geo_snapshot_create(
 
     if (error != NULL && error_size > 0) error[0] = '\0';
     if (result != NULL) memset(result, 0, sizeof(*result));
-    if (mmdb_path == NULL || country == NULL || strlen(country) != 2 ||
-        !isupper((unsigned char)country[0]) || !isupper((unsigned char)country[1]) ||
+    if (mmdb_path == NULL || countries == NULL ||
+        wardd_country_set_token(countries, country_token, sizeof(country_token)) != 0 ||
         max_source_bytes == 0 || !(max_change_ratio > 0.0 && max_change_ratio <= 1.0)) {
         set_error(error, error_size, "valid MMDB, country, size limit, and change ratio are required");
         return -1;
@@ -580,9 +588,10 @@ int wardd_geo_snapshot_create(
     if (snprintf(
             local_result.id,
             sizeof(local_result.id),
-            "%s-%s-v%s",
+            "%s-%s-s%u-v%s",
             local_result.source_sha256,
-            country,
+            country_token,
+            SNAPSHOT_METADATA_SCHEMA,
             WARDD_VERSION
         ) >= (int)sizeof(local_result.id) ||
         path_join(final_directory, sizeof(final_directory), snapshot_root, local_result.id) != 0) {
@@ -604,14 +613,14 @@ int wardd_geo_snapshot_create(
             goto done;
         }
         local_result.existed = true;
-        if (path_join(existing_path, sizeof(existing_path), final_directory, "cn-v4.txt") != 0 ||
+        if (path_join(existing_path, sizeof(existing_path), final_directory, "geo-v4.txt") != 0 ||
             read_prefixes(existing_path, &prefixes, error, error_size) != 0) {
             free_prefixes(&prefixes);
             goto done;
         }
         local_result.compile.ipv4_prefixes = prefixes.count;
         free_prefixes(&prefixes);
-        if (path_join(existing_path, sizeof(existing_path), final_directory, "cn-v6.txt") != 0 ||
+        if (path_join(existing_path, sizeof(existing_path), final_directory, "geo-v6.txt") != 0 ||
             read_prefixes(existing_path, &prefixes, error, error_size) != 0) {
             free_prefixes(&prefixes);
             goto done;
@@ -637,9 +646,9 @@ int wardd_geo_snapshot_create(
     }
     if (chmod(staging, 0750) != 0 ||
         path_join(source_path, sizeof(source_path), staging, "source.mmdb") != 0 ||
-        path_join(ipv4_path, sizeof(ipv4_path), staging, "cn-v4.txt") != 0 ||
-        path_join(ipv6_path, sizeof(ipv6_path), staging, "cn-v6.txt") != 0 ||
-        path_join(nginx_path, sizeof(nginx_path), staging, "nginx-cn.conf") != 0 ||
+        path_join(ipv4_path, sizeof(ipv4_path), staging, "geo-v4.txt") != 0 ||
+        path_join(ipv6_path, sizeof(ipv6_path), staging, "geo-v6.txt") != 0 ||
+        path_join(nginx_path, sizeof(nginx_path), staging, "nginx-geo.conf") != 0 ||
         path_join(metadata_path, sizeof(metadata_path), staging, "metadata.json") != 0 ||
         path_join(checksum_path, sizeof(checksum_path), staging, "sha256") != 0) {
         set_error(error, error_size, "cannot prepare snapshot paths: %s", strerror(errno));
@@ -648,7 +657,7 @@ int wardd_geo_snapshot_create(
     if (copy_source(mmdb_path, source_path, max_source_bytes, error, error_size) != 0 ||
         wardd_geo_compile_mmdb(
             source_path,
-            country,
+            countries,
             ipv4_path,
             ipv6_path,
             nginx_path,
@@ -659,14 +668,28 @@ int wardd_geo_snapshot_create(
         goto done;
     }
     safe_database_type(local_result.compile.database_type, database_type, sizeof(database_type));
+    country_json[0] = '\0';
+    for (size_t index = 0; index < countries->count; ++index) {
+        const size_t used = strlen(country_json);
+        if (snprintf(
+                country_json + used,
+                sizeof(country_json) - used,
+                "%s\"%s\"",
+                index == 0 ? "" : ", ",
+                countries->codes[index]
+            ) >= (int)(sizeof(country_json) - used)) {
+            set_error(error, error_size, "snapshot country list is too long");
+            goto done;
+        }
+    }
     if (snprintf(
             metadata,
             sizeof(metadata),
             "{\n"
-            "  \"schema\": 1,\n"
+            "  \"schema\": %u,\n"
             "  \"snapshot_id\": \"%s\",\n"
             "  \"source_sha256\": \"%s\",\n"
-            "  \"country\": \"%s\",\n"
+            "  \"countries\": [%s],\n"
             "  \"compiler_version\": \"%s\",\n"
             "  \"created_epoch\": %llu,\n"
             "  \"mmdb_build_epoch\": %llu,\n"
@@ -674,9 +697,10 @@ int wardd_geo_snapshot_create(
             "  \"ipv4_prefixes\": %zu,\n"
             "  \"ipv6_prefixes\": %zu\n"
             "}\n",
+            SNAPSHOT_METADATA_SCHEMA,
             local_result.id,
             local_result.source_sha256,
-            country,
+            country_json,
             WARDD_VERSION,
             (unsigned long long)time(NULL),
             (unsigned long long)local_result.compile.build_epoch,
@@ -826,7 +850,7 @@ static int activate_snapshot_unlocked(
         set_error(error, error_size, "snapshot %s is not approved", snapshot_id == NULL ? "" : snapshot_id);
         return -1;
     }
-    if (path_join(nginx_include, sizeof(nginx_include), directory, "nginx-cn.conf") != 0 ||
+    if (path_join(nginx_include, sizeof(nginx_include), directory, "nginx-geo.conf") != 0 ||
         (nginx_binary != NULL &&
          wardd_nginx_check_include(nginx_binary, nginx_include, error, error_size) != 0)) {
         return -1;

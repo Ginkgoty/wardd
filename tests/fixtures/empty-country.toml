@@ -1,12 +1,10 @@
 version = 1
 
 [geo]
-# One code, or several: country = ["CN", "JP"]. Their prefixes are merged into
-# a single allow set, so a source matching any listed country is permitted.
-country = ["CN"]
+country = []
 provider = "mmdb"
-url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
-checksum_url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb.sha256sum"
+url = "https://rules.example.test/country-lite.mmdb"
+checksum_url = "https://rules.example.test/country-lite.mmdb.sha256sum"
 update_interval = "24h"
 max_age = "14d"
 max_download_size = "32MiB"
@@ -25,9 +23,14 @@ address = "*"
 protocol = "tcp"
 port = 443
 
+[[xdp.geo_endpoint]]
+address = "2001:db8::10"
+protocol = "tcp"
+port = 8443
+
 [ban]
 protected_tcp_ports = [22, 80, 443]
-exempt = []
+exempt = ["203.0.113.10", "2001:db8:abcd::/48"]
 
 [ban.auto]
 enabled = false
@@ -43,7 +46,7 @@ strike_retention = "7d"
 enabled = true
 generated_dir = "/etc/wardd/generated"
 limit_event_log = "/var/log/nginx/wardd-limit.log"
-limit_zone = "wardd_default"
+limit_zone = "api"
 
 [firewall]
 ownership = "external"

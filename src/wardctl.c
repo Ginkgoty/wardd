@@ -10,6 +10,7 @@
 #include "wardd/version.h"
 #include "wardd/xdp.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <net/if.h>
 #include <stdbool.h>
@@ -40,6 +41,7 @@ struct command_options {
     const char *config_path;
     const char *snapshot_root;
     const char *nginx_binary;
+    bool nginx_binary_explicit;
     const char *bpf_object;
     const char *bpf_pin_root;
     const char *ban_state;
@@ -55,7 +57,7 @@ static void usage(FILE *stream)
         "  wardctl [--socket PATH] status [--json]\n"
         "  wardctl [--socket PATH] shutdown\n"
         "  wardctl config validate [PATH]\n"
-        "  wardctl geo compile MMDB OUTPUT_DIR [--country CC]\n"
+        "  wardctl geo compile MMDB OUTPUT_DIR [--country CC[,CC...]]\n"
         "  wardctl geo import MMDB [--config PATH] [--state-dir PATH]\n"
         "  wardctl geo update [--config PATH] [--state-dir PATH]\n"
         "  wardctl geo status [--state-dir PATH]\n"
@@ -65,6 +67,9 @@ static void usage(FILE *stream)
         "  wardctl geo rollback [--reload] [--config PATH] [--state-dir PATH] [--nginx PATH]\n"
         "  wardctl nginx render [--config PATH]\n"
         "  wardctl nginx check [SNAPSHOT] [--state-dir PATH] [--nginx PATH]\n"
+        "  wardctl nginx enable [--config PATH] [--nginx PATH]\n"
+        "  wardctl nginx disable [--config PATH] [--nginx PATH]\n"
+        "  wardctl nginx status [--config PATH] [--nginx PATH]\n"
         "  wardctl xdp status [--config PATH]\n"
         "  wardctl xdp attach --observe [--config PATH] [--state-dir PATH] [--object PATH] [--pin-root PATH]\n"
         "  wardctl xdp set-action geo|ban observe|enforce [--config PATH] [--pin-root PATH]\n"
@@ -92,6 +97,7 @@ static int parse_command_options(
     options->config_path = DEFAULT_CONFIG_PATH;
     options->snapshot_root = DEFAULT_SNAPSHOT_ROOT;
     options->nginx_binary = DEFAULT_NGINX_BINARY;
+    options->nginx_binary_explicit = false;
     options->bpf_object = DEFAULT_BPF_OBJECT;
     options->bpf_pin_root = DEFAULT_BPF_PIN_ROOT;
     options->ban_state = DEFAULT_BAN_STATE;
@@ -106,6 +112,7 @@ static int parse_command_options(
             options->snapshot_root = argv[start + 1];
         } else if (strcmp(argv[start], "--nginx") == 0) {
             options->nginx_binary = argv[start + 1];
+            options->nginx_binary_explicit = true;
         } else if (strcmp(argv[start], "--object") == 0) {
             options->bpf_object = argv[start + 1];
         } else if (strcmp(argv[start], "--pin-root") == 0) {
@@ -181,6 +188,99 @@ static int send_command(const char *socket_path, const char *command)
     return EXIT_SUCCESS;
 }
 
+/*
+ * --country takes the same set the configuration file does, written as a
+ * comma-separated list: --country CN,JP. The result is sorted so that the CLI
+ * and the configuration file produce identical snapshot identities.
+ */
+static int parse_country_option(const char *text, struct wardd_country_set *countries)
+{
+    const char *cursor = text;
+    size_t count = 0;
+
+    if (text == NULL || text[0] == '\0') return -1;
+    for (;;) {
+        const char *comma = strchr(cursor, ',');
+        const size_t length = comma == NULL ? strlen(cursor) : (size_t)(comma - cursor);
+
+        if (length != 2 || count == WARDD_MAX_COUNTRIES) return -1;
+        if (!isupper((unsigned char)cursor[0]) || !isupper((unsigned char)cursor[1])) return -1;
+        memcpy(countries->codes[count], cursor, length);
+        countries->codes[count][length] = '\0';
+        for (size_t index = 0; index < count; ++index) {
+            if (strcmp(countries->codes[index], countries->codes[count]) == 0) return -1;
+        }
+        count++;
+        if (comma == NULL) break;
+        cursor = comma + 1;
+    }
+    /*
+     * Insertion sort over fixed-size elements. memcpy rather than snprintf:
+     * source and destination live in the same array, and snprintf may not
+     * overlap its arguments.
+     */
+    for (size_t index = 1; index < count; ++index) {
+        char pending[WARDD_COUNTRY_LEN];
+        size_t position = index;
+
+        memcpy(pending, countries->codes[index], WARDD_COUNTRY_LEN);
+        while (position > 0 && strcmp(countries->codes[position - 1], pending) > 0) {
+            memcpy(countries->codes[position], countries->codes[position - 1], WARDD_COUNTRY_LEN);
+            position--;
+        }
+        memcpy(countries->codes[position], pending, WARDD_COUNTRY_LEN);
+    }
+    countries->count = count;
+    return 0;
+}
+
+static const char *country_list_text(const struct wardd_country_set *countries)
+{
+    static char text[WARDD_COUNTRY_TOKEN_LEN];
+
+    if (wardd_country_set_token(countries, text, sizeof(text)) != 0) {
+        (void)snprintf(text, sizeof(text), "invalid");
+    }
+    return text;
+}
+
+/*
+ * A country the operator asked for that the database never mentions produces a
+ * smaller policy than intended. That is legitimate for a regional database, so
+ * it is a warning rather than a failure -- but a silent one would be worse than
+ * either.
+ */
+static void warn_about_unmatched_countries(
+    const struct wardd_country_set *countries,
+    uint32_t matched
+)
+{
+    for (size_t index = 0; index < countries->count; ++index) {
+        if ((matched & ((uint32_t)1U << index)) != 0) continue;
+        fprintf(
+            stderr,
+            "wardctl: WARNING: the database holds no records for %s; "
+            "the compiled policy does not cover it\n",
+            countries->codes[index]
+        );
+    }
+}
+
+/*
+ * --nginx overrides nginx.binary, which itself defaults to a bare "nginx"
+ * resolved through PATH. Commands that have already loaded the configuration
+ * should use this rather than options->nginx_binary directly.
+ */
+static const char *effective_nginx_binary(
+    const struct command_options *options,
+    const struct wardd_config *config
+)
+{
+    if (options->nginx_binary_explicit) return options->nginx_binary;
+    if (config != NULL && config->nginx.binary[0] != '\0') return config->nginx.binary;
+    return options->nginx_binary;
+}
+
 static int validate_config_command(const char *path)
 {
     struct wardd_config config;
@@ -191,9 +291,9 @@ static int validate_config_command(const char *path)
         return EXIT_FAILURE;
     }
     printf(
-        "configuration is valid: schema=%u country=%s endpoints=%zu firewall=%s\n",
+        "configuration is valid: schema=%u countries=%s endpoints=%zu firewall=%s\n",
         config.version,
-        config.geo.country,
+        country_list_text(&config.geo.countries),
         config.xdp.endpoint_count,
         wardd_firewall_ownership_name(config.firewall.ownership)
     );
@@ -213,6 +313,7 @@ static int doctor_command(const char *path)
         return EXIT_FAILURE;
     }
     printf("Config: valid (schema %u)\n", config.version);
+    printf("Countries: %s\n", country_list_text(&config.geo.countries));
     printf("MMDB compiler: %s\n", wardd_geo_mmdb_available() ? "available" : "unavailable");
     printf("Firewall ownership: %s, managed: no\n", wardd_firewall_ownership_name(config.firewall.ownership));
     if (uname(&system_info) == 0) {
@@ -225,7 +326,22 @@ static int doctor_command(const char *path)
         "Kernel BTF: %s\n",
         access("/sys/kernel/btf/vmlinux", R_OK) == 0 ? "available" : "unavailable"
     );
-    printf("Nginx: %s\n", access("/usr/sbin/nginx", X_OK) == 0 ? "available" : "unavailable");
+    if (!config.nginx.enabled) {
+        printf("Nginx: integration disabled\n");
+    } else if (config.nginx.binary[0] == '/') {
+        const bool executable = access(config.nginx.binary, X_OK) == 0;
+        printf("Nginx: %s (%s)\n", executable ? "available" : "unavailable", config.nginx.binary);
+        if (!executable) warning = true;
+    } else {
+        /* A bare name is resolved through PATH by posix_spawnp at use time, so
+           there is no single path to probe here. */
+        printf("Nginx: %s, resolved through PATH\n", config.nginx.binary);
+    }
+    printf(
+        "Nginx conf.d: %s%s\n",
+        config.nginx.conf_dir,
+        !config.nginx.enabled || access(config.nginx.conf_dir, W_OK) == 0 ? "" : " (not writable)"
+    );
     if (wardd_geo_snapshot_status(DEFAULT_SNAPSHOT_ROOT, &snapshot_status, error, sizeof(error)) == 0) {
         printf(
             "Geo snapshot: %s (%zu stored)\n",
@@ -271,7 +387,11 @@ static int doctor_command(const char *path)
     return warning ? 2 : EXIT_SUCCESS;
 }
 
-static int geo_compile_command(const char *mmdb_path, const char *output_directory, const char *country)
+static int geo_compile_command(
+    const char *mmdb_path,
+    const char *output_directory,
+    const struct wardd_country_set *countries
+)
 {
     char ipv4_path[1024];
     char ipv6_path[1024];
@@ -280,9 +400,9 @@ static int geo_compile_command(const char *mmdb_path, const char *output_directo
     struct wardd_geo_compile_result result;
     int lengths[3];
 
-    lengths[0] = snprintf(ipv4_path, sizeof(ipv4_path), "%s/cn-v4.txt", output_directory);
-    lengths[1] = snprintf(ipv6_path, sizeof(ipv6_path), "%s/cn-v6.txt", output_directory);
-    lengths[2] = snprintf(nginx_path, sizeof(nginx_path), "%s/nginx-cn.conf", output_directory);
+    lengths[0] = snprintf(ipv4_path, sizeof(ipv4_path), "%s/geo-v4.txt", output_directory);
+    lengths[1] = snprintf(ipv6_path, sizeof(ipv6_path), "%s/geo-v6.txt", output_directory);
+    lengths[2] = snprintf(nginx_path, sizeof(nginx_path), "%s/nginx-geo.conf", output_directory);
     for (size_t index = 0; index < 3; index++) {
         if (lengths[index] < 0 || lengths[index] >= (int)sizeof(ipv4_path)) {
             fprintf(stderr, "wardctl: output path is too long\n");
@@ -292,7 +412,7 @@ static int geo_compile_command(const char *mmdb_path, const char *output_directo
 
     if (wardd_geo_compile_mmdb(
             mmdb_path,
-            country,
+            countries,
             ipv4_path,
             ipv6_path,
             nginx_path,
@@ -303,9 +423,10 @@ static int geo_compile_command(const char *mmdb_path, const char *output_directo
         fprintf(stderr, "wardctl: MMDB compilation failed: %s\n", error);
         return EXIT_FAILURE;
     }
+    warn_about_unmatched_countries(countries, result.matched_countries);
     printf(
-        "compiled country=%s ipv4=%zu ipv6=%zu database=%s build_epoch=%llu\n",
-        country,
+        "compiled countries=%s ipv4=%zu ipv6=%zu database=%s build_epoch=%llu\n",
+        country_list_text(countries),
         result.ipv4_prefixes,
         result.ipv6_prefixes,
         result.database_type,
@@ -356,7 +477,7 @@ static int geo_import_command(const char *mmdb_path, const struct command_option
     if (load_config(options->config_path, &config) != 0) return EXIT_FAILURE;
     if (wardd_geo_snapshot_create(
             mmdb_path,
-            config.geo.country,
+            &config.geo.countries,
             options->snapshot_root,
             config.geo.max_download_bytes,
             config.geo.max_change_ratio,
@@ -414,7 +535,7 @@ static int geo_update_command(const struct command_options *options)
     }
     if (wardd_geo_snapshot_create(
             mmdb_path,
-            config.geo.country,
+            &config.geo.countries,
             options->snapshot_root,
             config.geo.max_download_bytes,
             config.geo.max_change_ratio,
@@ -530,7 +651,7 @@ static int geo_activate_command(
         return EXIT_FAILURE;
     }
     generated_directory = config.nginx.enabled ? config.nginx.generated_dir : NULL;
-    nginx_binary = config.nginx.enabled ? options->nginx_binary : NULL;
+    nginx_binary = config.nginx.enabled ? effective_nginx_binary(options, &config) : NULL;
     if (config.nginx.enabled &&
         wardd_nginx_render(
             config.nginx.generated_dir,
@@ -615,7 +736,7 @@ static int nginx_render_command(const struct command_options *options)
             config.nginx.generated_dir
         ) >= (int)sizeof(generated_include) ||
         wardd_nginx_check_http_include(
-            options->nginx_binary, generated_include, error, sizeof(error)
+            effective_nginx_binary(options, &config), generated_include, error, sizeof(error)
         ) != 0) {
         fprintf(stderr, "wardctl: generated Nginx integration is invalid: %s\n", error);
         return EXIT_FAILURE;
@@ -625,6 +746,134 @@ static int nginx_render_command(const struct command_options *options)
         config.nginx.generated_dir
     );
     return EXIT_SUCCESS;
+}
+
+static int nginx_enable_command(const struct command_options *options)
+{
+    struct wardd_config config;
+    char error[2048];
+
+    if (load_config(options->config_path, &config) != 0) return EXIT_FAILURE;
+    if (!config.nginx.enabled) {
+        fprintf(stderr, "wardctl: Nginx integration is disabled in %s\n", options->config_path);
+        return EXIT_FAILURE;
+    }
+    if (wardd_nginx_render(
+            config.nginx.generated_dir, config.nginx.limit_event_log, config.nginx.limit_zone,
+            error, sizeof(error)
+        ) != 0) {
+        fprintf(stderr, "wardctl: cannot render Nginx integration: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    if (wardd_nginx_enable(
+            effective_nginx_binary(options, &config),
+            config.nginx.conf_dir,
+            config.nginx.generated_dir,
+            error,
+            sizeof(error)
+        ) != 0) {
+        fprintf(stderr, "wardctl: cannot wire Nginx: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    printf("wrote %s/wardd.conf; live configuration test passed\n", config.nginx.conf_dir);
+    printf(
+        "\nstill required -- add this to each server block you want protected, then reload:\n"
+        "    include %s/wardd-geo-allow.conf;\n"
+        "\nwardd cannot place that automatically: only you know which server it belongs in.\n"
+        "Run 'wardctl nginx status' afterwards to confirm Nginx picked it up.\n",
+        config.nginx.generated_dir
+    );
+    return EXIT_SUCCESS;
+}
+
+static int nginx_disable_command(const struct command_options *options)
+{
+    struct wardd_config config;
+    char error[2048];
+
+    if (load_config(options->config_path, &config) != 0) return EXIT_FAILURE;
+    const int removed = wardd_nginx_disable(
+        effective_nginx_binary(options, &config), config.nginx.conf_dir, error, sizeof(error)
+    );
+    if (removed < 0) {
+        fprintf(stderr, "wardctl: cannot unwire Nginx: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    if (removed == 0) {
+        printf("no wardd drop-in in %s; nothing to remove\n", config.nginx.conf_dir);
+        return EXIT_SUCCESS;
+    }
+    printf("removed %s/wardd.conf; live configuration test passed\n", config.nginx.conf_dir);
+    printf(
+        "any 'include %s/wardd-geo-allow.conf;' lines you added to server blocks\n"
+        "must be removed by hand, since wardd did not write them.\n",
+        config.nginx.generated_dir
+    );
+    return EXIT_SUCCESS;
+}
+
+static int nginx_status_command(const struct command_options *options)
+{
+    struct wardd_config config;
+    static char dump[WARDD_NGINX_DUMP_LEN];
+    char dropin_path[WARDD_PATH_LEN + 32];
+    char http_include[WARDD_PATH_LEN + 32];
+    char server_include[WARDD_PATH_LEN + 32];
+    char error[2048];
+    struct stat status;
+    bool dumped;
+    int missing = 0;
+
+    if (load_config(options->config_path, &config) != 0) return EXIT_FAILURE;
+    if (snprintf(dropin_path, sizeof(dropin_path), "%s/wardd.conf", config.nginx.conf_dir) >=
+            (int)sizeof(dropin_path) ||
+        snprintf(http_include, sizeof(http_include), "%s/wardd-geo.conf", config.nginx.generated_dir) >=
+            (int)sizeof(http_include) ||
+        snprintf(server_include, sizeof(server_include), "%s/wardd-geo-allow.conf",
+            config.nginx.generated_dir) >= (int)sizeof(server_include)) {
+        fprintf(stderr, "wardctl: configured Nginx paths are too long\n");
+        return EXIT_FAILURE;
+    }
+    printf("Nginx integration: %s\n", config.nginx.enabled ? "enabled" : "disabled");
+    printf("Nginx binary: %s\n", effective_nginx_binary(options, &config));
+    printf("Generated files: %s%s\n", config.nginx.generated_dir,
+        lstat(http_include, &status) == 0 ? "" : " (not rendered)");
+    printf("Drop-in: %s%s\n", dropin_path,
+        lstat(dropin_path, &status) == 0 ? "" : " (absent)");
+
+    dumped = wardd_nginx_dump_config(
+        effective_nginx_binary(options, &config), dump, sizeof(dump), error, sizeof(error)) == 0;
+    if (!dumped) {
+        /* An unreadable live configuration is an unknown state, not a healthy
+           one, so it must not report success. */
+        printf("Live configuration: unavailable (%s)\n", error);
+        missing++;
+    } else {
+        const bool http_wired = strstr(dump, http_include) != NULL;
+        const bool server_wired = strstr(dump, server_include) != NULL;
+
+        printf("http include: %s\n", http_wired ? "active" : "NOT wired");
+        printf("server include: %s\n",
+            server_wired ? "active" : "NOT found in any server block");
+        if (!http_wired) missing++;
+        if (!server_wired) missing++;
+    }
+    if (lstat(config.nginx.limit_event_log, &status) == 0) {
+        printf("Event log: %s (present)\n", config.nginx.limit_event_log);
+    } else {
+        printf("Event log: %s (absent; Nginx creates it on the first rejection)\n",
+            config.nginx.limit_event_log);
+    }
+    if (dumped && missing != 0) {
+        printf("\nto finish wiring:\n");
+        if (strstr(dump, http_include) == NULL) printf("    wardctl nginx enable\n");
+        if (strstr(dump, server_include) == NULL) {
+            printf("    add to the server block you want protected:\n");
+            printf("        include %s;\n", server_include);
+        }
+        printf("    %s -t && systemctl reload nginx\n", effective_nginx_binary(options, &config));
+    }
+    return missing == 0 ? EXIT_SUCCESS : 2;
 }
 
 static int safe_snapshot_id(const char *id)
@@ -657,14 +906,20 @@ static int nginx_check_command(const char *id, const struct command_options *opt
         snprintf(
             include_path,
             sizeof(include_path),
-            "%s/%s/nginx-cn.conf",
+            "%s/%s/nginx-geo.conf",
             options->snapshot_root,
             id
         ) >= (int)sizeof(include_path)) {
         fprintf(stderr, "wardctl: invalid snapshot ID\n");
         return EXIT_FAILURE;
     }
-    if (wardd_nginx_check_include(options->nginx_binary, include_path, error, sizeof(error)) != 0) {
+    /* This command works on a snapshot rather than the live tree, so a missing
+       or broken configuration only costs the nginx.binary default. */
+    struct wardd_config config;
+    const char *binary = wardd_config_load(options->config_path, &config, error, sizeof(error)) == 0
+        ? effective_nginx_binary(options, &config)
+        : options->nginx_binary;
+    if (wardd_nginx_check_include(binary, include_path, error, sizeof(error)) != 0) {
         fprintf(stderr, "wardctl: %s\n", error);
         return EXIT_FAILURE;
     }
@@ -955,6 +1210,32 @@ static int parse_cli_duration(const char *text, uint64_t *seconds)
     return 0;
 }
 
+/*
+ * Banning private or otherwise special-purpose space is allowed: an operator
+ * may be running wardd somewhere that traffic is genuinely hostile. It is
+ * however the fastest way to lock yourself out of a host, so it is announced
+ * before the ban is written rather than after, and loudly enough to notice in
+ * a scrollback.
+ */
+static void warn_about_reserved_ban(const char *network)
+{
+    char summary[WARDD_BAN_RESERVED_SUMMARY_LEN];
+    char canonical[WARDD_BAN_NETWORK_LEN];
+
+    if (wardd_ban_reserved_overlap(network, summary, sizeof(summary)) == 0) return;
+    if (wardd_ban_normalize(network, canonical, NULL, 0) != 0) {
+        (void)snprintf(canonical, sizeof(canonical), "%s", network);
+    }
+    fprintf(stderr, "wardctl: WARNING: %s overlaps special-purpose address space\n", canonical);
+    fprintf(stderr, "wardctl: WARNING:   %s\n", summary);
+    fprintf(
+        stderr,
+        "wardctl: WARNING: this can lock out management access and break internal traffic.\n"
+        "wardctl: WARNING: proceeding anyway; undo with: wardctl ban remove %s\n",
+        canonical
+    );
+}
+
 static int ban_add_command(
     const char *network,
     uint64_t duration_seconds,
@@ -968,6 +1249,7 @@ static int ban_add_command(
     const time_t now = time(NULL);
 
     if (load_config(options->config_path, &config) != 0) return EXIT_FAILURE;
+    warn_about_reserved_ban(network);
     if (now < 0 || wardd_ban_store_upsert(
             options->ban_state,
             network,
@@ -1243,6 +1525,7 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[index], "geo") == 0 && index + 3 < argc &&
         strcmp(argv[index + 1], "compile") == 0) {
+        struct wardd_country_set countries = {0};
         const char *country = "CN";
         if (index + 4 < argc) {
             if (strcmp(argv[index + 4], "--country") != 0 || index + 5 >= argc || index + 6 != argc) {
@@ -1254,7 +1537,12 @@ int main(int argc, char **argv)
             usage(stderr);
             return EXIT_FAILURE;
         }
-        return geo_compile_command(argv[index + 2], argv[index + 3], country);
+        if (parse_country_option(country, &countries) != 0) {
+            fprintf(stderr, "wardctl: --country takes up to %d two-letter codes, as CN or CN,JP\n",
+                WARDD_MAX_COUNTRIES);
+            return EXIT_FAILURE;
+        }
+        return geo_compile_command(argv[index + 2], argv[index + 3], &countries);
     }
     if (strcmp(argv[index], "geo") == 0 && index + 1 < argc) {
         struct command_options options;
@@ -1334,6 +1622,27 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             return nginx_check_command(snapshot_id, &options);
+        }
+        if (strcmp(operation, "enable") == 0) {
+            if (parse_command_options(argc, argv, index + 2, &options) != 0) {
+                usage(stderr);
+                return EXIT_FAILURE;
+            }
+            return nginx_enable_command(&options);
+        }
+        if (strcmp(operation, "disable") == 0) {
+            if (parse_command_options(argc, argv, index + 2, &options) != 0) {
+                usage(stderr);
+                return EXIT_FAILURE;
+            }
+            return nginx_disable_command(&options);
+        }
+        if (strcmp(operation, "status") == 0) {
+            if (parse_command_options(argc, argv, index + 2, &options) != 0) {
+                usage(stderr);
+                return EXIT_FAILURE;
+            }
+            return nginx_status_command(&options);
         }
     }
     if (strcmp(argv[index], "xdp") == 0 && index + 1 < argc) {

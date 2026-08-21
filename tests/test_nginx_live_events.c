@@ -101,9 +101,9 @@ int main(void)
     CHECK(port > 0, "reserve loopback port");
     (void)snprintf(generated, sizeof(generated), "%s/generated", directory);
     (void)snprintf(current, sizeof(current), "%s/current", generated);
-    (void)snprintf(current_include, sizeof(current_include), "%s/nginx-cn.conf", current);
+    (void)snprintf(current_include, sizeof(current_include), "%s/nginx-geo.conf", current);
     (void)snprintf(geo_include, sizeof(geo_include), "%s/wardd-geo.conf", generated);
-    (void)snprintf(server_include, sizeof(server_include), "%s/wardd-cn-only.conf", generated);
+    (void)snprintf(server_include, sizeof(server_include), "%s/wardd-geo-allow.conf", generated);
     (void)snprintf(event_log, sizeof(event_log), "%s/events.log", directory);
     (void)snprintf(config_path, sizeof(config_path), "%s/nginx.conf", directory);
     (void)snprintf(html_directory, sizeof(html_directory), "%s/html", directory);
@@ -180,7 +180,7 @@ int main(void)
     }
     static const char *const paths[] = {
         "nginx.conf", "nginx.pid", "error.log", "events.log", "html/index.html",
-        "generated/current/nginx-cn.conf", "generated/wardd-geo.conf", "generated/wardd-cn-only.conf"
+        "generated/current/nginx-geo.conf", "generated/wardd-geo.conf", "generated/wardd-geo-allow.conf"
     };
     for (size_t index = 0; index < sizeof(paths) / sizeof(paths[0]); ++index) {
         char path[1024];
