@@ -176,12 +176,12 @@ sudo wardctl xdp detach
 
 - [Installation and deployment](doc/installation.md): dependencies, build,
   installation, Nginx, systemd, staged XDP rollout, and rollback.
+- [User manual](doc/usage.md): day-to-day operation -- GeoIP updates, staged
+  enforcement, bans, monitoring, and what to do when something looks wrong.
 - [TOML configuration reference](doc/configuration.md): every schema 1 field,
   constraint, and security semantic.
 - [Release process](doc/releasing.md): nightly semantics, stable versioning,
   release gates, tag creation, artifacts, and recovery from failed releases.
-- [v0.1.0 acceptance record](doc/acceptance-v0.1.0.md): what was verified
-  before the release, on which hosts, and what remains unverified.
 
 ## Common operations
 
